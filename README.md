@@ -10,6 +10,7 @@
 * Made installer change to sed (was broken before)
 * ware optimizations
 
+
 </details>
 
 <details>
@@ -25,6 +26,7 @@ cd SkywareOS\
 chmod +x skyware-setup.sh\
 ./skyware-setup.sh
 </details>
+
 
 <details>
 <summary>Documentation</summary>
@@ -79,5 +81,6 @@ chmod +x skyware-setup.sh\
 * ware setup niri - Automatically sets up Niri (EXPERIMENTAL)
 
 * ware setup mango - Automatically sets up MangoWC (EXPERIMENTAL)
+
 
 </details>
