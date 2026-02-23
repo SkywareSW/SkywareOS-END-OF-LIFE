@@ -257,8 +257,8 @@ NAME="SkywareOS"
 PRETTY_NAME="SkywareOS"
 ID=skywareos
 ID_LIKE=arch
-VERSION="Red(0.58)"
-VERSION_ID=Release_0-58
+VERSION="Red(0.5)"
+VERSION_ID=Release_0-5
 HOME_URL="https://github.com/SkywareSW"
 LOGO=skywareos
 EOF
@@ -268,8 +268,8 @@ NAME="SkywareOS"
 PRETTY_NAME="SkywareOS"
 ID=skywareos
 ID_LIKE=arch
-VERSION="Red(0.58)"
-VERSION_ID=Release_0-58
+VERSION="Red(0.5)"
+VERSION_ID=Release_0-5
 LOGO=skywareos
 EOF
 
