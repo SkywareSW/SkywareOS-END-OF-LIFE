@@ -4,6 +4,10 @@
 <summary>Update Logs</summary>
 <br>
 
+# Red (V0.6.1)
+
+* Added Version display to ware status
+
 # Red (V0.6)
 
 * Added snap support (ware setup snap)
