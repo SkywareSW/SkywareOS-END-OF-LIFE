@@ -46,7 +46,7 @@ chmod +x skyware-setup.sh\
 
 * Ware
 
-* ware status - Shows kernel and version, Uptime, Available updates, Firewall status, Disk usage, Memory usage, Current Desktop and current channel
+* ware status - Shows kernel and version, Uptime, Available updates, Firewall status, Disk usage, Memory usage, Current Desktop, Current channel and current version
 
 * ware install <pkg> - Searches for said package through pacman, flatpak and aur and then proceeds to install it
 
