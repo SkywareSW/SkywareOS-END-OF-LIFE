@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SkywareOS — by SkywareSW</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;700;800;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #0d0f14;
+    --surface:  #13151c;
+    --overlay:  #1a1d27;
+    --border:   rgba(255,255,255,0.07);
+    --text:     #e2e4ef;
+    --muted:    #6b7094;
+    --green:    #a6e3a1;
+    --teal:     #94e2d5;
+    --blue:     #89b4fa;
+    --lavender: #b4befe;
+    --mauve:    #cba6f7;
+    --red:      #f38ba8;
+    --yellow:   #f9e2af;
+    --peach:    #fab387;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    pointer-events: none; z-index: 999; opacity: 0.4;
+  }
+
+  /* ── HEADER ── */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 1.2rem 2.5rem;
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+    background: rgba(13,15,20,0.6);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo {
+    font-family: 'Syne', sans-serif; font-weight: 800;
+    font-size: 1.1rem; letter-spacing: 0.08em;
+    color: var(--green); text-shadow: 0 0 20px rgba(166,227,161,0.4);
+    text-decoration: none;
+  }
+  .logo span { color: var(--teal); }
+  nav { display: flex; gap: 1.8rem; align-items: center; }
+  nav a {
+    font-size: 0.72rem; letter-spacing: 0.15em;
+    text-transform: uppercase; color: var(--muted);
+    text-decoration: none; transition: color 0.2s;
+  }
+  nav a:hover { color: var(--lavender); }
+  .nav-badge {
+    font-size: 0.6rem; letter-spacing: 0.1em;
+    padding: 0.2rem 0.7rem; border-radius: 999px;
+    background: rgba(166,227,161,0.08);
+    border: 1px solid rgba(166,227,161,0.2);
+    color: var(--green);
+  }
+
+  /* ── ORBS ── */
+  .orb {
+    position: absolute; border-radius: 50%;
+    filter: blur(90px); opacity: 0.25;
+    animation: drift 14s ease-in-out infinite alternate;
+    pointer-events: none;
+  }
+  .orb1 { width:600px;height:600px; background:radial-gradient(circle,var(--green),transparent 70%); top:-200px;right:-100px; animation-delay:0s; }
+  .orb2 { width:400px;height:400px; background:radial-gradient(circle,var(--teal),transparent 70%); bottom:-100px;left:-80px; animation-delay:-5s; }
+  .orb3 { width:280px;height:280px; background:radial-gradient(circle,var(--blue),transparent 70%); top:40%;left:35%; animation-delay:-9s; }
+  @keyframes drift {
+    from { transform:translate(0,0) scale(1); }
+    to   { transform:translate(30px,25px) scale(1.08); }
+  }
+
+  @keyframes fadeUp {
+    from { opacity:0; transform:translateY(18px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
+
+  /* ── HERO ── */
+  .hero {
+    min-height: 90vh;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: center;
+    gap: 4rem;
+    padding: 6rem 5rem;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero-left { position: relative; z-index: 1; }
+
+  .breadcrumb {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-size: 0.68rem; letter-spacing: 0.1em;
+    color: var(--muted); margin-bottom: 2rem;
+    animation: fadeUp 0.4s ease both;
+  }
+  .breadcrumb a { color: var(--muted); text-decoration: none; transition: color 0.2s; }
+  .breadcrumb a:hover { color: var(--text); }
+  .breadcrumb .sep { color: rgba(255,255,255,0.15); }
+  .breadcrumb .current { color: var(--green); }
+
+  .hero-title {
+    font-family: 'Syne', sans-serif;
+    font-weight: 900;
+    font-size: clamp(3rem, 6vw, 5.5rem);
+    line-height: 0.95;
+    letter-spacing: -0.04em;
+    animation: fadeUp 0.4s 0.1s ease both; opacity: 0;
+  }
+  .hero-title .skyware { color: var(--text); }
+  .hero-title .os {
+    color: var(--green);
+    text-shadow: 0 0 50px rgba(166,227,161,0.3);
+    display: block;
+  }
+
+  .version-pill {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    margin-top: 1.2rem;
+    font-size: 0.7rem; letter-spacing: 0.12em;
+    padding: 0.35rem 1rem; border-radius: 999px;
+    background: rgba(166,227,161,0.08);
+    border: 1px solid rgba(166,227,161,0.2);
+    color: var(--green);
+    animation: fadeUp 0.4s 0.15s ease both; opacity: 0;
+  }
+  .version-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px rgba(166,227,161,0.8);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .hero-desc {
+    margin-top: 1.5rem;
+    color: var(--muted); font-size: 0.82rem; line-height: 1.8;
+    max-width: 440px;
+    animation: fadeUp 0.4s 0.2s ease both; opacity: 0;
+  }
+
+  .hero-actions {
+    display: flex; gap: 0.75rem; flex-wrap: wrap;
+    margin-top: 2rem;
+    animation: fadeUp 0.4s 0.3s ease both; opacity: 0;
+  }
+
+  .btn {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem; letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.65rem 1.4rem;
+    border-radius: 6px;
+    text-decoration: none;
+    transition: all 0.2s;
+    cursor: pointer; border: none;
+    display: inline-flex; align-items: center; gap: 0.5rem;
+  }
+  .btn-green {
+    background: rgba(166,227,161,0.1);
+    border: 1px solid rgba(166,227,161,0.3);
+    color: var(--green);
+  }
+  .btn-green:hover {
+    background: rgba(166,227,161,0.18);
+    border-color: var(--green);
+    box-shadow: 0 0 24px rgba(166,227,161,0.12);
+  }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .btn-ghost:hover { border-color: rgba(255,255,255,0.2); color: var(--text); }
+
+  /* ── INSTALL CARD (hero right) ── */
+  .hero-right {
+    position: relative; z-index: 1;
+    animation: fadeUp 0.4s 0.2s ease both; opacity: 0;
+  }
+
+  .install-card {
+    background: rgba(13,15,20,0.9);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow:
+      0 40px 80px rgba(0,0,0,0.6),
+      0 0 0 1px rgba(255,255,255,0.03),
+      inset 0 1px 0 rgba(255,255,255,0.06);
+  }
+
+  .card-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .card-bar-left { display: flex; align-items: center; gap: 6px; }
+  .cb { width: 9px; height: 9px; border-radius: 50%; }
+  .cb-r{background:#f38ba8;} .cb-y{background:#f9e2af;} .cb-g{background:#a6e3a1;}
+  .card-title { font-size: 9px; letter-spacing: 0.1em; color: var(--muted); margin-left: 6px; }
+  .copy-btn-sm {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem; letter-spacing: 0.1em;
+    color: var(--green); background: rgba(166,227,161,0.08);
+    border: 1px solid rgba(166,227,161,0.2);
+    border-radius: 4px; padding: 2px 8px;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .copy-btn-sm:hover { background: rgba(166,227,161,0.15); }
+  .copy-btn-sm.copied { color: var(--teal); border-color: rgba(148,226,213,0.3); }
+
+  .card-body {
+    padding: 16px 18px;
+    font-size: 11px; line-height: 2;
+    font-family: 'Space Mono', monospace;
+  }
+  .sc { color: #6b7094; }
+  .sg { color: var(--green); }
+  .sb { color: var(--blue); }
+  .sm { color: var(--muted); }
+  .sy { color: var(--yellow); }
+  .st { color: var(--teal); }
+  .sp { color: var(--mauve); }
+
+  /* ── SECTIONS COMMON ── */
+  .section {
+    padding: 4rem 5rem;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .section-label {
+    font-size: 0.65rem; letter-spacing: 0.25em;
+    text-transform: uppercase; color: var(--muted);
+    display: flex; align-items: center; gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .section-label::before {
+    content: ''; width: 24px; height: 1px;
+    background: var(--border);
+  }
+
+  .section-title {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800; font-size: 2rem;
+    letter-spacing: -0.03em;
+    margin-bottom: 2rem;
+  }
+
+  /* ── CHANGELOG ── */
+  .changelog-list { display: flex; flex-direction: column; gap: 1rem; }
+
+  .changelog-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .changelog-item:hover { border-color: rgba(166,227,161,0.2); }
+
+  .cl-header {
+    display: flex; align-items: center; gap: 1rem;
+    padding: 1rem 1.4rem;
+    cursor: pointer;
+    background: rgba(255,255,255,0.02);
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.2s;
+  }
+  .changelog-item.open .cl-header {
+    border-bottom-color: var(--border);
+  }
+
+  .cl-version {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800; font-size: 1rem;
+    letter-spacing: -0.01em;
+  }
+  .cl-codename {
+    font-size: 0.65rem; letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 2px 8px; border-radius: 999px;
+  }
+  .cn-red    { color:var(--red);    background:rgba(243,139,168,0.08); border:1px solid rgba(243,139,168,0.2); }
+  .cn-green  { color:var(--green);  background:rgba(166,227,161,0.08); border:1px solid rgba(166,227,161,0.2); }
+  .cn-blue   { color:var(--blue);   background:rgba(137,180,250,0.08); border:1px solid rgba(137,180,250,0.2); }
+
+  .cl-arrow {
+    margin-left: auto; color: var(--muted); font-size: 0.8rem;
+    transition: transform 0.25s;
+  }
+  .changelog-item.open .cl-arrow { transform: rotate(180deg); }
+
+  .cl-body {
+    padding: 0 1.4rem;
+    max-height: 0; overflow: hidden;
+    transition: max-height 0.35s ease, padding 0.2s;
+  }
+  .changelog-item.open .cl-body {
+    max-height: 400px;
+    padding: 1rem 1.4rem;
+  }
+
+  .cl-entry {
+    display: flex; align-items: flex-start; gap: 0.75rem;
+    padding: 0.35rem 0;
+    font-size: 0.75rem; color: var(--muted); line-height: 1.6;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+  }
+  .cl-entry:last-child { border-bottom: none; }
+  .cl-bullet {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--green); flex-shrink: 0; margin-top: 6px;
+  }
+  .cl-entry:hover { color: var(--text); }
+
+  /* ── WARE COMMANDS ── */
+  .commands-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 0.6rem;
+  }
+
+  .cmd-item {
+    display: flex; align-items: flex-start; gap: 0.75rem;
+    padding: 0.85rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .cmd-item:hover {
+    border-color: rgba(148,226,213,0.25);
+    transform: translateY(-1px);
+  }
+
+  .cmd-name {
+    font-size: 0.72rem; font-weight: 700;
+    color: var(--teal); white-space: nowrap;
+    flex-shrink: 0;
+    font-family: 'Space Mono', monospace;
+    min-width: 160px;
+  }
+  .cmd-desc {
+    font-size: 0.68rem; color: var(--muted); line-height: 1.5;
+  }
+
+  .cmd-group-label {
+    font-size: 0.62rem; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--muted);
+    padding: 0.5rem 0 0.75rem;
+    grid-column: 1 / -1;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.25rem;
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .cmd-group-label::before {
+    content: ''; width: 12px; height: 1px; background: var(--border);
+  }
+
+  /* ── INSTALL STEPS ── */
+  .install-steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .install-step {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .install-step:hover {
+    border-color: rgba(166,227,161,0.25);
+    transform: translateY(-2px);
+  }
+  .step-num {
+    font-family: 'Syne', sans-serif; font-weight: 800;
+    font-size: 2rem; color: rgba(166,227,161,0.12);
+    line-height: 1; margin-bottom: 0.5rem;
+  }
+  .step-title {
+    font-size: 0.75rem; font-weight: 700;
+    color: var(--green); letter-spacing: 0.08em;
+    margin-bottom: 0.35rem;
+  }
+  .step-desc {
+    font-size: 0.68rem; color: var(--muted); line-height: 1.6;
+  }
+
+  .script-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .script-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.75rem 1.2rem;
+    background: rgba(255,255,255,0.02);
+    border-bottom: 1px solid var(--border);
+  }
+  .script-header-left { display: flex; align-items: center; gap: 0.6rem; }
+  .cfg-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .cfg-filename { font-size: 0.7rem; letter-spacing: 0.08em; color: var(--muted); }
+  .copy-btn {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem; letter-spacing: 0.1em;
+    color: var(--green); background: rgba(166,227,161,0.08);
+    border: 1px solid rgba(166,227,161,0.2);
+    border-radius: 4px; padding: 0.3rem 0.8rem;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .copy-btn:hover { background: rgba(166,227,161,0.15); }
+  .copy-btn.copied { color: var(--teal); border-color: rgba(148,226,213,0.3); }
+
+  .script-body {
+    padding: 1.2rem 1.4rem;
+    font-size: 0.72rem; line-height: 1.9;
+    overflow-x: auto;
+    font-family: 'Space Mono', monospace;
+  }
+  .sh-comment { color: #6b7094; }
+  .sh-cmd     { color: var(--blue); }
+  .sh-str     { color: var(--yellow); }
+  .sh-flag    { color: var(--peach); }
+  .sh-var     { color: var(--mauve); }
+  .sh-fn      { color: var(--green); font-weight: 700; }
+  .sh-section { color: var(--green); font-weight: 700; display: block; margin-top: 0.6rem; }
+
+  /* ── RELATED REPOS ── */
+  .related-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+  }
+
+  .related-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.4rem;
+    text-decoration: none;
+    display: flex; flex-direction: column; gap: 0.6rem;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .related-card:hover { transform: translateY(-2px); }
+  .related-card.rb:hover { border-color: rgba(137,180,250,0.3); }
+  .related-card.rm:hover { border-color: rgba(203,166,247,0.3); }
+  .related-card.rt:hover { border-color: rgba(148,226,213,0.3); }
+
+  .related-name {
+    font-family: 'Syne', sans-serif; font-weight: 700;
+    font-size: 0.9rem;
+  }
+  .related-desc { font-size: 0.68rem; color: var(--muted); line-height: 1.5; }
+  .related-arrow { margin-left: auto; color: var(--muted); font-size: 0.85rem; transition: all 0.2s; }
+  .related-card:hover .related-arrow { transform: translate(2px,-2px); color: var(--text); }
+  .related-top { display: flex; align-items: center; justify-content: space-between; }
+
+  /* ── FOOTER ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 2rem 2.5rem;
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--muted); font-size: 0.68rem; letter-spacing: 0.08em;
+  }
+  footer a { color: var(--green); text-decoration: none; }
+  footer a:hover { color: var(--teal); }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; padding: 4rem 2rem; min-height: auto; gap: 3rem; }
+    .section { padding: 3rem 2rem; }
+    .related-grid { grid-template-columns: 1fr; }
+    .commands-grid { grid-template-columns: 1fr; }
+    header { padding: 1rem 1.5rem; }
+    nav { gap: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <a class="logo" href="https://SkywareSW.github.io">Skyware<span>OS</span></a>
+  <nav>
+    <span class="nav-badge">v0.6.1 red</span>
+    <a href="#install">install</a>
+    <a href="#changelog">changelog</a>
+    <a href="#commands">ware</a>
+    <a href="https://github.com/SkywareSW/SkywareOS" target="_blank">github ↗</a>
+  </nav>
+</header>
+
+<!-- ── HERO ── -->
+<section class="hero">
+  <div class="orb orb1"></div>
+  <div class="orb orb2"></div>
+  <div class="orb orb3"></div>
+
+  <div class="hero-left">
+    <div class="breadcrumb">
+      <a href="https://SkywareSW.github.io">SkywareSW</a>
+      <span class="sep">/</span>
+      <span class="current">SkywareOS</span>
+    </div>
+
+    <h1 class="hero-title">
+      <span class="skyware">Skyware</span>
+      <span class="os">OS</span>
+    </h1>
+
+    <div class="version-pill">
+      <span class="version-dot"></span>
+      current: Red v0.6.1
+    </div>
+
+    <p class="hero-desc">
+      a linux distribution built around arch, a curated app stack, and a cohesive aesthetic. powered by the <code style="color:var(--teal)">ware</code> package manager — one command to rule them all.
+    </p>
+
+    <div class="hero-actions">
+      <a class="btn btn-green" href="#install">↓ install</a>
+      <a class="btn btn-ghost" href="#commands">ware docs</a>
+      <a class="btn btn-ghost" href="https://github.com/SkywareSW/SkywareOS" target="_blank">github ↗</a>
+    </div>
+  </div>
+
+  <div class="hero-right">
+    <div class="install-card">
+      <div class="card-bar">
+        <div class="card-bar-left">
+          <div class="cb cb-r"></div>
+          <div class="cb cb-y"></div>
+          <div class="cb cb-g"></div>
+          <span class="card-title">kitty — ~/setup</span>
+        </div>
+        <button class="copy-btn-sm" id="heroInstallCopy" onclick="copyHeroInstall()">copy</button>
+      </div>
+      <div class="card-body">
+        <div><span class="sg">❯ </span><span style="color:var(--text)">git clone https://github.com/</span></div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--blue)">SkywareSW/SkywareOS</span></div>
+        <div class="sm">&nbsp;</div>
+        <div><span class="sg">❯ </span><span style="color:var(--text)">cd SkywareOS</span></div>
+        <div class="sm">&nbsp;</div>
+        <div><span class="sg">❯ </span><span style="color:var(--text)">chmod +x skyware-setup.sh</span></div>
+        <div class="sm">&nbsp;</div>
+        <div><span class="sg">❯ </span><span style="color:var(--text)">./skyware-setup.sh</span></div>
+        <div class="sm">&nbsp;</div>
+        <div><span class="st">  skywareOS v0.6.1 (Red)</span></div>
+        <div><span class="sm">  setting up your system...</span></div>
+        <div><span class="sg">  ✓ packages installed</span></div>
+        <div><span class="sg">  ✓ ware configured</span></div>
+        <div><span class="sg">  ✓ hyprland ready</span></div>
+        <div class="sm">&nbsp;</div>
+        <div><span class="sg">❯ </span><span style="color:var(--blue)">ware status</span></div>
+        <div><span class="sp">  channel</span> <span class="sm">~</span> <span style="color:var(--text)">release</span></div>
+        <div><span class="sp">  version</span> <span class="sm">~</span> <span style="color:var(--text)">Red v0.6.1</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── INSTALL ── -->
+<section class="section" id="install">
+  <div class="section-label">getting started</div>
+  <h2 class="section-title">install <span style="color:var(--green)">skywareOS</span></h2>
+
+  <div class="install-steps">
+    <div class="install-step">
+      <div class="step-num">01</div>
+      <div class="step-title">clone the repo</div>
+      <div class="step-desc">grab the latest source from github — just needs git installed on your base system</div>
+    </div>
+    <div class="install-step">
+      <div class="step-num">02</div>
+      <div class="step-title">run the script</div>
+      <div class="step-desc">chmod and execute skyware-setup.sh — it handles everything from packages to display manager</div>
+    </div>
+    <div class="install-step">
+      <div class="step-num">03</div>
+      <div class="step-title">ware is ready</div>
+      <div class="step-desc">after install, use <code style="color:var(--teal)">ware</code> for everything — install, update, search, switch channels</div>
+    </div>
+    <div class="install-step">
+      <div class="step-num">04</div>
+      <div class="step-title">log in to hyprland</div>
+      <div class="step-desc">select hyprland from your display manager — optionally run <code style="color:var(--teal)">ware setup hyprland</code> for a full rice</div>
+    </div>
+  </div>
+
+  <div class="script-card">
+    <div class="script-header">
+      <div class="script-header-left">
+        <div class="cfg-dot" style="background:var(--green)"></div>
+        <span class="cfg-filename">install commands</span>
+      </div>
+      <button class="copy-btn" id="installCopyBtn" onclick="copyInstall()">copy</button>
+    </div>
+    <div class="script-body">
+<span class="sh-comment"># clone the repo</span>
+<span class="sh-cmd">git</span> clone https://github.com/SkywareSW/SkywareOS
+<span class="sh-cmd">cd</span> SkywareOS
+
+<span class="sh-comment"># make executable and run</span>
+<span class="sh-cmd">chmod</span> <span class="sh-flag">+x</span> skyware-setup.sh
+<span class="sh-cmd">./</span>skyware-setup.sh
+
+<span class="sh-comment"># after install — verify ware is working</span>
+<span class="sh-cmd">ware</span> status
+
+<span class="sh-comment"># optional: set up hyprland rice</span>
+<span class="sh-cmd">ware</span> setup hyprland
+
+<span class="sh-comment"># switch to testing channel (optional)</span>
+<span class="sh-cmd">ware</span> switch
+    </div>
+  </div>
+
+  <div style="
+    margin-top: 1rem;
+    background: var(--surface);
+    border: 1px solid rgba(166,227,161,0.2);
+    border-radius: 10px;
+    padding: 1.1rem 1.4rem;
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  ">
+    <div>
+      <div style="font-size:0.6rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--muted);margin-bottom:0.4rem;">or just run this</div>
+      <code style="font-family:'Space Mono',monospace;font-size:0.8rem;color:var(--green)">
+        <span style="color:var(--muted)">$</span> bash &lt;(curl -sL https://raw.githubusercontent.com/SkywareSW/SkywareOS/main/skyware-setup.sh)
+      </code>
+    </div>
+    <button class="copy-btn" id="onelineCopyBtn" onclick="copyOneliner()" style="flex-shrink:0">copy</button>
+  </div>
+</section>
+
+<!-- ── CHANGELOG ── -->
+<section class="section" id="changelog">
+  <div class="section-label">update logs</div>
+  <h2 class="section-title">version <span style="color:var(--red)">history</span></h2>
+
+  <div style="
+    display:flex; flex-wrap:wrap; gap:0.6rem;
+    margin-bottom: 2rem;
+  ">
+    <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.9rem;border-radius:999px;background:rgba(243,139,168,0.08);border:1px solid rgba(243,139,168,0.2);font-size:0.65rem;letter-spacing:0.1em;">
+      <span style="width:7px;height:7px;border-radius:50%;background:var(--red);display:inline-block"></span>
+      <span style="color:var(--red)">0.x.x</span><span style="color:var(--muted)">— Red</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.9rem;border-radius:999px;background:rgba(243,100,100,0.08);border:1px solid rgba(243,100,100,0.2);font-size:0.65rem;letter-spacing:0.1em;">
+      <span style="width:7px;height:7px;border-radius:50%;background:#f05e5e;display:inline-block"></span>
+      <span style="color:#f05e5e">1.x.x</span><span style="color:var(--muted)">— Crimson</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.9rem;border-radius:999px;background:rgba(250,179,135,0.08);border:1px solid rgba(250,179,135,0.2);font-size:0.65rem;letter-spacing:0.1em;">
+      <span style="width:7px;height:7px;border-radius:50%;background:var(--peach);display:inline-block"></span>
+      <span style="color:var(--peach)">2.x.x</span><span style="color:var(--muted)">— Ember</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.9rem;border-radius:999px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);font-size:0.65rem;letter-spacing:0.1em;color:var(--muted);">
+      and so on...
+    </div>
+  </div>
+
+  <div class="changelog-list">
+
+    <div class="changelog-item open">
+      <div class="cl-header" onclick="toggleCl(this)">
+        <span class="cl-version" style="color:var(--red)">v0.6.1</span>
+        <span class="cl-codename cn-red">Red</span>
+        <span style="font-size:0.65rem;color:var(--muted);margin-left:0.5rem">latest</span>
+        <span class="cl-arrow">▾</span>
+      </div>
+      <div class="cl-body">
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Added version display to <code style="color:var(--teal)">ware status</code></span></div>
+      </div>
+    </div>
+
+    <div class="changelog-item">
+      <div class="cl-header" onclick="toggleCl(this)">
+        <span class="cl-version" style="color:var(--red)">v0.6</span>
+        <span class="cl-codename cn-red">Red</span>
+        <span class="cl-arrow">▾</span>
+      </div>
+      <div class="cl-body">
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Added snap support via <code style="color:var(--teal)">ware setup snap</code></span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>GPU drivers now automatically detected — no more manual selection</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Dramatically improved <code style="color:var(--teal)">ware search</code> accuracy and speed</span></div>
+      </div>
+    </div>
+
+    <div class="changelog-item">
+      <div class="cl-header" onclick="toggleCl(this)">
+        <span class="cl-version" style="color:var(--red)">v0.5</span>
+        <span class="cl-codename cn-red">Red</span>
+        <span class="cl-arrow">▾</span>
+      </div>
+      <div class="cl-body">
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Significantly faster installation — added <code style="color:var(--teal)">--needed</code> flag to most install commands</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Fixed installer: switched to <code style="color:var(--teal)">sed</code> (was broken in previous builds)</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>General ware performance optimizations</span></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ── WARE COMMANDS ── -->
+<section class="section" id="commands">
+  <div class="section-label">package manager</div>
+  <h2 class="section-title">ware <span style="color:var(--teal)">commands</span></h2>
+
+  <div class="commands-grid">
+
+    <div class="cmd-group-label">packages</div>
+    <div class="cmd-item"><span class="cmd-name">ware install</span><span class="cmd-desc">searches pacman, flatpak and AUR then installs the package</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware remove</span><span class="cmd-desc">removes a package from the system</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware update</span><span class="cmd-desc">updates system or a specific package</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware search</span><span class="cmd-desc">searches for package or closest keyword across pacman, flatpak and AUR</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware info</span><span class="cmd-desc">shows available information on a package</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware list</span><span class="cmd-desc">lists all installed packages</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware interactive</span><span class="cmd-desc">simpler guided way to find and install a package</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware --json</span><span class="cmd-desc">run a custom command or script using JSON</span></div>
+
+    <div class="cmd-group-label">system</div>
+    <div class="cmd-item"><span class="cmd-name">ware status</span><span class="cmd-desc">shows kernel, version, uptime, updates, firewall, disk, memory, desktop, channel</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware upgrade</span><span class="cmd-desc">installs and runs the latest version of skywareOS</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware switch</span><span class="cmd-desc">switches between Release and Testing channels</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware doctor</span><span class="cmd-desc">finds and fixes corrupt or broken packages and dependencies, checks firewall</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware clean</span><span class="cmd-desc">removes unused repositories and packages</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware autoremove</span><span class="cmd-desc">automatically removes unused packages</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware sync</span><span class="cmd-desc">syncs mirrors for faster package downloads</span></div>
+
+    <div class="cmd-group-label">power</div>
+    <div class="cmd-item"><span class="cmd-name">ware power balanced</span><span class="cmd-desc">switch to balanced power mode</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware power performance</span><span class="cmd-desc">switch to performance power mode</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware power battery</span><span class="cmd-desc">switch to battery saver power mode</span></div>
+
+    <div class="cmd-group-label">display manager</div>
+    <div class="cmd-item"><span class="cmd-name">ware dm list</span><span class="cmd-desc">lists available display managers</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware dm status</span><span class="cmd-desc">shows currently active display manager</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware dm switch</span><span class="cmd-desc">switch between sddm, gdm, or lightdm</span></div>
+
+    <div class="cmd-group-label">setup</div>
+    <div class="cmd-item"><span class="cmd-name">ware setup hyprland</span><span class="cmd-desc">automatically sets up hyprland with jakoolit's dotfiles</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware setup lazyvim</span><span class="cmd-desc">automatically sets up LazyVim neovim config</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware setup niri</span><span class="cmd-desc">sets up Niri window manager <span style="color:var(--yellow)">(experimental)</span></span></div>
+    <div class="cmd-item"><span class="cmd-name">ware setup mango</span><span class="cmd-desc">sets up MangoWC <span style="color:var(--yellow)">(experimental)</span></span></div>
+    <div class="cmd-item"><span class="cmd-name">ware setup snap</span><span class="cmd-desc">installs and enables the Snap package manager</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware setup snap-remove</span><span class="cmd-desc">removes the Snap package manager</span></div>
+
+  </div>
+</section>
+
+<!-- ── RELATED ── -->
+<section class="section">
+  <div class="section-label">ecosystem</div>
+  <h2 class="section-title">related <span style="color:var(--lavender)">repos</span></h2>
+
+  <div class="related-grid">
+    <a class="related-card rb" href="https://github.com/SkywareSW/hyprware" target="_blank">
+      <div class="related-top">
+        <span style="font-size:1.2rem">🌙</span>
+        <span class="related-arrow">↗</span>
+      </div>
+      <div class="related-name" style="color:var(--blue)">hyprware</div>
+      <div class="related-desc">catppuccin mocha hyprland rice — the recommended desktop for skywareOS</div>
+    </a>
+    <a class="related-card rm" href="https://github.com/SkywareSW/ware" target="_blank">
+      <div class="related-top">
+        <span style="font-size:1.2rem">⚙️</span>
+        <span class="related-arrow">↗</span>
+      </div>
+      <div class="related-name" style="color:var(--mauve)">ware</div>
+      <div class="related-desc">a programming language built around simplicity</div>
+    </a>
+    <a class="related-card rt" href="https://github.com/SkywareSW/SkywareOS-Testing" target="_blank">
+      <div class="related-top">
+        <span style="font-size:1.2rem">🧪</span>
+        <span class="related-arrow">↗</span>
+      </div>
+      <div class="related-name" style="color:var(--teal)">SkywareOS-Testing</div>
+      <div class="related-desc">bleeding-edge builds and experimental features before they hit stable</div>
+    </a>
+  </div>
+</section>
+
+<footer>
+  <div>SkywareOS — by <a href="https://SkywareSW.github.io">SkywareSW</a></div>
+  <div>catppuccin mocha · skywareOS · <a href="https://github.com/SkywareSW/SkywareOS" target="_blank">github ↗</a></div>
+</footer>
+
+<script>
+  function toggleCl(header) {
+    const item = header.parentElement;
+    item.classList.toggle('open');
+  }
+
+  function copyHeroInstall() {
+    const text = `git clone https://github.com/SkywareSW/SkywareOS\ncd SkywareOS\nchmod +x skyware-setup.sh\n./skyware-setup.sh`;
+    navigator.clipboard?.writeText(text);
+    const btn = document.getElementById('heroInstallCopy');
+    btn.textContent = 'copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 2000);
+  }
+
+  function copyInstall() {
+    const text = `git clone https://github.com/SkywareSW/SkywareOS\ncd SkywareOS\nchmod +x skyware-setup.sh\n./skyware-setup.sh\nware status`;
+    navigator.clipboard?.writeText(text);
+    const btn = document.getElementById('installCopyBtn');
+    btn.textContent = 'copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 2000);
+  }
+
+  function copyOneliner() {
+    navigator.clipboard?.writeText('bash <(curl -sL https://raw.githubusercontent.com/SkywareSW/SkywareOS/main/skyware-setup.sh)');
+    const btn = document.getElementById('onelineCopyBtn');
+    btn.textContent = 'copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 2000);
+  }
+
+  // scroll fade-in for cards
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((e, i) => {
+      if (e.isIntersecting) {
+        e.target.style.animation = `fadeUp 0.4s ${i * 0.05}s ease forwards`;
+        observer.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.08 });
+
+  document.querySelectorAll('.cmd-item, .install-step, .related-card, .changelog-item').forEach(el => {
+    el.style.opacity = '0';
+    observer.observe(el);
+  });
+</script>
+</body>
+</html>
