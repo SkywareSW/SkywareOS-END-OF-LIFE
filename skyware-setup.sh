@@ -51,6 +51,129 @@ else
     echo "⚠ Could not detect GPU automatically"
 fi
 
+# ============================================================
+# SkywareOS - Limine Branding
+# ============================================================
+
+echo "== Checking for Limine bootloader =="
+
+LIMINE_CONF=""
+
+# Auto-detect Limine config
+if [ -f /boot/limine.conf ]; then
+    LIMINE_CONF="/boot/limine.conf"
+elif [ -f /boot/EFI/limine/limine.conf ]; then
+    LIMINE_CONF="/boot/EFI/limine/limine.conf"
+fi
+
+if [ -n "$LIMINE_CONF" ]; then
+    echo "→ Limine detected at $LIMINE_CONF"
+
+    # Create theme directory
+    sudo mkdir -p /boot/limine/skyware
+
+    # Install static wallpaper
+    if [ -f assets/skywareos-wallpaper.png ]; then
+        sudo cp assets/skywareos-wallpaper.png \
+            /boot/limine/skyware/background.png
+        echo "✔ Wallpaper installed"
+    else
+        echo "⚠ Wallpaper not found: assets/skywareos-wallpaper.png"
+    fi
+
+    # Install icon
+    if [ -f assets/skywareos.svg ]; then
+        sudo cp assets/skywareos.svg \
+            /boot/limine/skyware/icon.svg
+        echo "✔ Icon installed"
+    else
+        echo "⚠ Icon not found: assets/skywareos.svg"
+    fi
+
+    # Rename boot entry safely
+    if grep -q "/Arch Linux" "$LIMINE_CONF"; then
+        sudo sed -i 's|/Arch Linux|/SkywareOS|g' "$LIMINE_CONF"
+        echo "✔ Boot entry renamed to SkywareOS"
+    fi
+
+    # Add static theme settings if not already present
+    if ! grep -q "# SkywareOS Static Theme" "$LIMINE_CONF"; then
+        sudo tee -a "$LIMINE_CONF" > /dev/null << 'EOF'
+
+# SkywareOS Static Theme
+wallpaper: boot():/limine/skyware/background.png
+wallpaper_style: stretch
+term_background: 0x1e1e1e
+term_foreground: 0xffffff
+selection_background: 0xff3333
+selection_foreground: 0xffffff
+icon: boot():/limine/skyware/icon.svg
+
+EOF
+        echo "✔ Limine theme applied"
+    fi
+
+    echo "→ Limine branding complete."
+else
+    echo "→ Limine not detected. Skipping setup."
+fi
+
+# ============================================================
+# SkywareOS - Boot Splash
+# ============================================================
+
+echo "== Setting up SkywareOS static boot splash (Plymouth) =="
+
+# Install Plymouth if not installed
+if ! command -v plymouthd &>/dev/null; then
+    echo "→ Installing Plymouth..."
+    sudo pacman -S --noconfirm plymouth plymouth-theme-spinner
+fi
+
+# Create SkywareOS Plymouth theme directory
+sudo mkdir -p /usr/share/plymouth/themes/skywareos
+
+# Copy logo/wallpaper if exists
+if [ -f assets/skywareos-logo.png ]; then
+    sudo cp assets/skywareos-logo.png /usr/share/plymouth/themes/skywareos/logo.png
+    echo "✔ Logo installed"
+else
+    echo "⚠ Logo not found: assets/skywareos-logo.png"
+fi
+
+# Copy wallpaper if exists (optional for full-screen)
+if [ -f assets/skywareos-wallpaper.png ]; then
+    sudo cp assets/skywareos-wallpaper.png /usr/share/plymouth/themes/skywareos/background.png
+    echo "✔ Wallpaper installed"
+fi
+
+# Create skywareos.plymouth descriptor
+sudo tee /usr/share/plymouth/themes/skywareos/skywareos.plymouth > /dev/null << 'EOF'
+[Plymouth Theme]
+Name=SkywareOS
+Description=SkywareOS Static Boot Splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/skywareos
+ScriptFile=/usr/share/plymouth/themes/skywareos/skywareos.script
+EOF
+
+# Create the minimal script to display static logo
+sudo tee /usr/share/plymouth/themes/skywareos/skywareos.script > /dev/null << 'EOF'
+# Set black background
+plymouth.set_background_color(0,0,0)
+
+# Display the logo centered
+plymouth.image("logo.png")
+EOF
+
+# Set SkywareOS theme as default
+sudo plymouth-set-default-theme -R skywareos
+echo "✔ Plymouth theme set as default and initramfs rebuilt"
+
+echo "→ Boot splash setup complete"
+
 # -----------------------------
 # Desktop Environment / Compositor Selection
 # -----------------------------
@@ -761,6 +884,14 @@ case "$1" in
             echo "⚠ xdg-open not found. Please open the URL manually:"
             echo "  https://skywaresw.github.io/SkywareOS"
         fi
+        ;;
+    dualboot)
+        header
+        echo "→ Installing limine-entry-tool"
+        yay -S limine-entry-tool --noconfirm
+        echo -e "${YELLOW}→ Select the OS you want to add to limine...${RESET}"
+        echo -e "${GREEN}→ Probably (1. Windows Boot Manager)...${RESET}"
+        sudo limine-entry-tool --scan
         ;;
     snap)
         header
