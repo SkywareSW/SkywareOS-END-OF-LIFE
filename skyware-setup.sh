@@ -52,14 +52,14 @@ else
 fi
 
 # ============================================================
-# SkywareOS - Limine Branding
+# SkywareOS: Limine Boot Entry + Static Plymouth Logo Setup
 # ============================================================
 
-echo "== Checking for Limine bootloader =="
+echo "== Setting up SkywareOS bootloader and static boot splash =="
 
-LIMINE_CONF=""
-
-# Auto-detect Limine config
+# -----------------------------
+# Detect Limine
+# -----------------------------
 if [ -f /boot/limine.conf ]; then
     LIMINE_CONF="/boot/limine.conf"
 elif [ -f /boot/EFI/limine/limine.conf ]; then
@@ -69,62 +69,25 @@ fi
 if [ -n "$LIMINE_CONF" ]; then
     echo "→ Limine detected at $LIMINE_CONF"
 
-    # Create theme directory
-    sudo mkdir -p /boot/limine/skyware
+    # Rename default boot entry
+    sudo sed -i '/^:default$/,/^$/{
+        s|^\(\s*\)#*\s*title.*$|    title SkywareOS|
+        t
+        /linux/ i\    title SkywareOS
+    }' "$LIMINE_CONF"
 
-    # Install static wallpaper
-    if [ -f assets/skywareos-wallpaper.png ]; then
-        sudo cp assets/skywareos-wallpaper.png \
-            /boot/limine/skyware/background.png
-        echo "✔ Wallpaper installed"
-    else
-        echo "⚠ Wallpaper not found: assets/skywareos-wallpaper.png"
-    fi
+    echo "✔ Limine default entry renamed to SkywareOS"
 
-    # Install icon
-    if [ -f assets/skywareos.svg ]; then
-        sudo cp assets/skywareos.svg \
-            /boot/limine/skyware/icon.svg
-        echo "✔ Icon installed"
-    else
-        echo "⚠ Icon not found: assets/skywareos.svg"
-    fi
-
-    # Rename boot entry safely
-    if grep -q "/Arch Linux" "$LIMINE_CONF"; then
-        sudo sed -i 's|/Arch Linux|/SkywareOS|g' "$LIMINE_CONF"
-        echo "✔ Boot entry renamed to SkywareOS"
-    fi
-
-    # Add static theme settings if not already present
-    if ! grep -q "# SkywareOS Static Theme" "$LIMINE_CONF"; then
-        sudo tee -a "$LIMINE_CONF" > /dev/null << 'EOF'
-
-# SkywareOS Static Theme
-wallpaper: boot():/limine/skyware/background.png
-wallpaper_style: stretch
-term_background: 0x1e1e1e
-term_foreground: 0xffffff
-selection_background: 0xff3333
-selection_foreground: 0xffffff
-icon: boot():/limine/skyware/icon.svg
-
-EOF
-        echo "✔ Limine theme applied"
-    fi
-
-    echo "→ Limine branding complete."
+    # Ensure quiet splash in options
+    sudo sed -i '/^:default$/,/^$/ s|options \(.*\)|options \1 quiet splash|' "$LIMINE_CONF"
+    echo "✔ Kernel options updated for boot splash"
 else
-    echo "→ Limine not detected. Skipping setup."
+    echo "⚠ Limine not detected, skipping bootloader setup"
 fi
 
-# ============================================================
-# SkywareOS - Boot Splash
-# ============================================================
-
-echo "== Setting up SkywareOS boot splash (Plymouth) =="
-
-# Install Plymouth if missing
+# -----------------------------
+# Install Plymouth
+# -----------------------------
 if ! command -v plymouthd &>/dev/null; then
     echo "→ Installing Plymouth..."
     sudo pacman -S --noconfirm plymouth
@@ -133,10 +96,10 @@ fi
 # Install librsvg for SVG -> PNG conversion
 sudo pacman -S --noconfirm librsvg
 
-# Create SkywareOS Plymouth theme directory
+# Create theme directory
 sudo mkdir -p /usr/share/plymouth/themes/skywareos
 
-# Convert SVG logo to PNG and copy
+# Convert SVG logo to PNG
 if [ -f assets/skywareos-logo.svg ]; then
     sudo rsvg-convert -w 512 -h 512 -o /usr/share/plymouth/themes/skywareos/logo.png \
         assets/skywareos-logo.svg
@@ -145,7 +108,7 @@ else
     echo "⚠ Logo not found: assets/skywareos-logo.svg"
 fi
 
-# Create descriptor file for Plymouth
+# Descriptor
 sudo tee /usr/share/plymouth/themes/skywareos/skywareos.plymouth > /dev/null << 'EOF'
 [Plymouth Theme]
 Name=SkywareOS
@@ -157,20 +120,29 @@ ImageDir=/usr/share/plymouth/themes/skywareos
 ScriptFile=/usr/share/plymouth/themes/skywareos/skywareos.script
 EOF
 
-# Create minimal script for centered logo on black background
+# Minimal script: black background + centered logo
 sudo tee /usr/share/plymouth/themes/skywareos/skywareos.script > /dev/null << 'EOF'
-# Set black background
 plymouth.set_background_color(0,0,0)
-
-# Display the logo centered
 plymouth.image("logo.png")
 EOF
 
-# Set SkywareOS theme as default and rebuild initramfs
-sudo plymouth-set-default-theme -R skywareos
-echo "✔ Plymouth theme set as default (logo only) and initramfs rebuilt"
+# -----------------------------
+# 3️⃣ Ensure Plymouth hook in mkinitcpio
+# -----------------------------
+if ! grep -q plymouth /etc/mkinitcpio.conf; then
+    echo "→ Adding plymouth hook to mkinitcpio.conf"
+    sudo sed -i '/^HOOKS=/ s/)/ plymouth)/' /etc/mkinitcpio.conf
+fi
 
-echo "→ Boot splash setup complete"
+# Rebuild initramfs
+sudo mkinitcpio -P
+echo "✔ Initramfs rebuilt with Plymouth hook"
+
+# Set default Plymouth theme
+sudo plymouth-set-default-theme -R skywareos
+echo "✔ Plymouth theme set as default"
+
+echo "→ SkywareOS bootloader + static boot setup complete"
 
 # -----------------------------
 # Desktop Environment / Compositor Selection
