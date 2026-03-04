@@ -1,6 +1,18 @@
 #!/bin/bash
 echo "== SkywareOS setup starting =="
 
+# ── Script Safety Setup ─────────────────────────────────────
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ASSETS_DIR="$SCRIPT_DIR/assets"
+
+echo "→ Running from: $SCRIPT_DIR"
+
+if [ ! -d "$ASSETS_DIR" ]; then
+    echo "⚠ Assets directory not found: $ASSETS_DIR"
+fi
+
 # -----------------------------
 # Pacman packages
 # -----------------------------
@@ -134,49 +146,54 @@ else
     echo "⚠ Limine config not found — skipping bootloader branding"
 fi
 
-# ── 2. Plymouth bootsplash ───────────────────────────────────
-echo "→ Setting up Plymouth bootsplash..."
+# ============================================================
+# Plymouth Bootsplash (Hardened)
+# ============================================================
 
-if ! command -v plymouthd &>/dev/null; then
-    sudo pacman -S --noconfirm --needed plymouth
-fi
-sudo pacman -S --noconfirm --needed librsvg
+echo "== Setting up Plymouth bootsplash (hardened) =="
 
-THEME_DIR="/usr/share/plymouth/themes/skywareos"
-sudo mkdir -p "$THEME_DIR"
-
-# Convert logo SVG → PNG for Plymouth (512x512 and a smaller 128x128 spinner base)
-if [ -f assets/skywareos.svg ]; then
-    sudo rsvg-convert -w 512 -h 512 assets/skywareos.svg \
-        -o "$THEME_DIR/logo.png"
-    sudo rsvg-convert -w 128 -h 128 assets/skywareos.svg \
-        -o "$THEME_DIR/logo-small.png"
-    echo "✔ Plymouth logo images generated"
+# Ensure asset path exists
+if [ ! -f "$ASSETS_DIR/skywareos.svg" ]; then
+    echo "⚠ skywareos.svg not found in $ASSETS_DIR"
+    echo "⚠ Skipping Plymouth setup to avoid boot issues"
 else
-    echo "⚠ assets/skywareos.svg not found — Plymouth will show text-only splash"
-fi
 
-# Theme descriptor
-sudo tee "$THEME_DIR/skywareos.plymouth" >/dev/null << 'EOF'
+    sudo pacman -S --noconfirm --needed plymouth librsvg
+
+    THEME_NAME="skywareos"
+    THEME_DIR="/usr/share/plymouth/themes/$THEME_NAME"
+
+    sudo mkdir -p "$THEME_DIR"
+
+    echo "→ Generating Plymouth logo images..."
+
+    sudo rsvg-convert -w 512 -h 512 "$ASSETS_DIR/skywareos.svg" \
+        -o "$THEME_DIR/logo.png"
+
+    sudo rsvg-convert -w 128 -h 128 "$ASSETS_DIR/skywareos.svg" \
+        -o "$THEME_DIR/logo-small.png"
+
+    if [ ! -f "$THEME_DIR/logo.png" ]; then
+        echo "⚠ Logo conversion failed — skipping Plymouth to prevent boot hang"
+    else
+
+        echo "→ Writing Plymouth theme files..."
+
+        sudo tee "$THEME_DIR/$THEME_NAME.plymouth" >/dev/null <<EOF
 [Plymouth Theme]
 Name=SkywareOS
 Description=SkywareOS Boot Splash
 ModuleName=script
 
 [script]
-ImageDir=/usr/share/plymouth/themes/skywareos
-ScriptFile=/usr/share/plymouth/themes/skywareos/skywareos.script
+ImageDir=$THEME_DIR
+ScriptFile=$THEME_DIR/$THEME_NAME.script
 EOF
 
-# Plymouth script — centered logo on dark background with a clean progress bar
-sudo tee "$THEME_DIR/skywareos.script" >/dev/null << 'EOF'
-# ── SkywareOS Plymouth Theme ──────────────────────────────────
-
-# Background
+        sudo tee "$THEME_DIR/$THEME_NAME.script" >/dev/null <<'EOF'
 Window.SetBackgroundTopColor(0.07, 0.07, 0.07);
 Window.SetBackgroundBottomColor(0.04, 0.04, 0.05);
 
-# Load and center the logo
 logo.image = Image("logo.png");
 logo.sprite = Sprite(logo.image);
 
@@ -184,29 +201,20 @@ logo.x = Window.GetWidth()  / 2 - logo.image.GetWidth()  / 2;
 logo.y = Window.GetHeight() / 2 - logo.image.GetHeight() / 2 - 40;
 logo.sprite.SetPosition(logo.x, logo.y, 0);
 
-# Progress bar — thin strip at bottom
 bar_height  = 3;
 bar_y       = Window.GetHeight() - 60;
 bar_width   = Window.GetWidth() * 0.4;
 bar_x       = Window.GetWidth() / 2 - bar_width / 2;
 
-# Background track (dark)
 bar_bg.image  = Image.Scale(Image.New(1, 1), bar_width, bar_height);
 bar_bg.image.SetOpacity(0.15);
 bar_bg.sprite = Sprite(bar_bg.image);
 bar_bg.sprite.SetPosition(bar_x, bar_y, 1);
 
-# Filled portion (light gray)
-bar.width  = 1;
+bar.width  = 2;
 bar.image  = Image.Scale(Image.New(1, 1), bar.width, bar_height);
 bar.sprite = Sprite(bar.image);
 bar.sprite.SetPosition(bar_x, bar_y, 2);
-
-fun refresh_callback() {
-    bar.sprite.SetOpacity(1);
-    bar_bg.sprite.SetOpacity(0.2);
-}
-Plymouth.SetRefreshFunction(refresh_callback);
 
 fun boot_progress_callback(duration, progress) {
     new_width = Math.Int(bar_width * progress);
@@ -219,53 +227,47 @@ fun boot_progress_callback(duration, progress) {
     }
 }
 Plymouth.SetBootProgressFunction(boot_progress_callback);
-
-fun quit_callback() {
-    logo.sprite.SetOpacity(0);
-    bar.sprite.SetOpacity(0);
-    bar_bg.sprite.SetOpacity(0);
-}
-Plymouth.SetQuitFunction(quit_callback);
 EOF
 
-# ── 3. Properly configure mkinitcpio for Plymouth + KMS ─────────────
+        # ----------------------------------------------------
+        # Safe mkinitcpio configuration
+        # ----------------------------------------------------
 
-echo "→ Configuring mkinitcpio hooks safely..."
+        echo "→ Configuring mkinitcpio safely..."
 
-MKINIT="/etc/mkinitcpio.conf"
+        MKINIT="/etc/mkinitcpio.conf"
 
-# Detect GPU for early KMS module loading
-GPU_INFO=$(lspci | grep -E "VGA|3D")
+        if [ -f "$MKINIT" ]; then
+            sudo cp "$MKINIT" "$MKINIT.bak"
 
-if echo "$GPU_INFO" | grep -qi "NVIDIA"; then
-    echo "→ NVIDIA detected: enabling early KMS"
-    sudo sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' $MKINIT
-elif echo "$GPU_INFO" | grep -qi "AMD"; then
-    echo "→ AMD detected: enabling early KMS"
-    sudo sed -i 's/^MODULES=.*/MODULES=(amdgpu)/' $MKINIT
-elif echo "$GPU_INFO" | grep -qi "Intel"; then
-    echo "→ Intel detected: enabling early KMS"
-    sudo sed -i 's/^MODULES=.*/MODULES=(i915)/' $MKINIT
+            GPU_INFO=$(lspci | grep -E "VGA|3D")
+
+            if echo "$GPU_INFO" | grep -qi "NVIDIA"; then
+                sudo sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' $MKINIT
+            elif echo "$GPU_INFO" | grep -qi "AMD"; then
+                sudo sed -i 's/^MODULES=.*/MODULES=(amdgpu)/' $MKINIT
+            elif echo "$GPU_INFO" | grep -qi "Intel"; then
+                sudo sed -i 's/^MODULES=.*/MODULES=(i915)/' $MKINIT
+            fi
+
+            sudo sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms plymouth keyboard keymap block filesystems fsck)/' $MKINIT
+
+            sudo mkinitcpio -P
+        fi
+
+        # ----------------------------------------------------
+        # Set theme safely
+        # ----------------------------------------------------
+
+        if [ -f "$THEME_DIR/logo.png" ]; then
+            sudo plymouth-set-default-theme -R $THEME_NAME
+            echo "✔ Plymouth configured successfully"
+        else
+            echo "⚠ Plymouth logo missing — falling back to spinner"
+            sudo plymouth-set-default-theme -R spinner
+        fi
+    fi
 fi
-
-# Force clean, correct HOOK ordering
-sudo sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms plymouth keyboard keymap block filesystems fsck)/' $MKINIT
-
-echo "✔ mkinitcpio hooks corrected"
-
-# Rebuild initramfs
-sudo mkinitcpio -P
-
-# Set Plymouth theme
-sudo plymouth-set-default-theme -R skywareos
-
-echo "✔ Initramfs rebuilt with proper KMS + Plymouth ordering"
-
-sudo mkinitcpio -P
-echo "✔ Initramfs rebuilt with Plymouth"
-
-sudo plymouth-set-default-theme -R skywareos
-echo "✔ Plymouth theme set: skywareos"
 
 echo "→ Bootloader branding + bootsplash setup complete"
 
@@ -865,6 +867,11 @@ print(f'{gb/elapsed:.1f} GB/s')
         echo -e "ware git                 - Open SkywareOS website"
         echo -e "ware dualboot            - Set up dual boot with Limine" ;;
     interactive) interactive_install ;;
+    safe-boot)
+        sudo sed -i 's/ plymouth//g' /etc/mkinitcpio.conf
+        sudo mkinitcpio -P
+        echo "✔ Plymouth disabled. Reboot to recover."
+        ;;
     *)
         echo "Usage: ware <command>"
         echo "Run 'ware help' for a full list of commands." ;;
