@@ -456,7 +456,20 @@ sudo gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 # Register the logo under a dedicated icon name for Kickoff
 sudo cp assets/skywareos.svg \
     /usr/share/icons/hicolor/scalable/apps/skywareos-start.svg 2>/dev/null || true
-sudo gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
+
+# Set viewBox tuned to actual path bounds in skywareos.svg
+# (paths use transform translate(228,192), content spans ~150,145 to 365,360)
+for ICON_SVG in \
+    /usr/share/icons/hicolor/scalable/apps/skywareos-start.svg \
+    /usr/share/icons/hicolor/scalable/apps/skywareos.svg; do
+    if [ -f "$ICON_SVG" ]; then
+        sudo sed -i 's/viewBox="[^"]*"//g; s/<svg /<svg viewBox="150 145 215 215" /' "$ICON_SVG"
+        echo "✔ viewBox set on $(basename $ICON_SVG)"
+    fi
+done
+
+sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+sudo kbuildsycoca6 --noincremental 2>/dev/null || true
 
 # KDE Kickoff icon — set via autostart script after Plasma loads
 # kwriteconfig6 at install time doesn't work because the applet ID isn't known yet.
@@ -920,15 +933,42 @@ function createWindow() {
 
 ipcMain.handle('run-cmd', async (event, cmd) => {
   return new Promise((resolve) => {
-    // Run as the current user (not root via pkexec) with a full PATH so
-    // /usr/local/bin/ware and standard utils (free, df, uptime) are all found
     const env = {
       ...process.env,
       PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:' + (process.env.PATH || ''),
     };
-    exec(`bash -c "${cmd.replace(/"/g, '\\"')}"`, { env }, (err, stdout, stderr) => {
-      resolve({ stdout: stdout || '', stderr: stderr || '', code: err ? err.code : 0 });
-    });
+
+    // Commands that are interactive or long-running need a real terminal
+    // Launch them in kitty/alacritty instead of running inline
+    const TERMINAL_CMDS = ['ware upgrade', 'ware switch', 'ware setup'];
+    const needsTerminal = TERMINAL_CMDS.some(c => cmd.startsWith(c.replace(/^\/usr\/local\/bin\//, '')));
+
+    if (needsTerminal) {
+      const term = ['kitty', 'alacritty', 'konsole', 'xterm'].find(t => {
+        try { require('child_process').execSync(`which ${t}`); return true; } catch { return false; }
+      });
+      if (term) {
+        require('child_process').spawn(term, ['-e', 'bash', '-c', `${cmd}; echo; read -p 'Press Enter to close...'`], {
+          env, detached: true, stdio: 'ignore'
+        }).unref();
+        resolve({ stdout: '→ Opened in terminal: ' + term, stderr: '', code: 0 });
+      } else {
+        resolve({ stdout: '', stderr: 'No terminal emulator found. Run manually: ' + cmd, code: 1 });
+      }
+      return;
+    }
+
+    // Non-interactive commands — pipe empty stdin so prompts get EOF instead of hanging
+    // Increase maxBuffer to 50MB for commands with lots of output (flatpak update etc.)
+    const child = exec(
+      `bash -c "${cmd.replace(/"/g, '\\"')}"`,
+      { env, maxBuffer: 50 * 1024 * 1024, timeout: 120000 },
+      (err, stdout, stderr) => {
+        resolve({ stdout: stdout || '', stderr: stderr || '', code: err ? err.code : 0 });
+      }
+    );
+    // Close stdin immediately so interactive prompts get EOF and don't hang
+    if (child.stdin) child.stdin.end();
   });
 });
 
@@ -1123,7 +1163,7 @@ function StatusSection({run}) {
         <Card label="Updates"    value={`${s.updates} available`} ab={parseInt(s.updates)>0?C.yellow+"44":undefined}/>
       </div>
       <div style={{display:"flex",gap:"10px",flexWrap:"wrap"}}>
-        <Btn label="Run Diagnostics" cmd="ware doctor"    onClick={run} icon="🩺"/>
+        <Btn label="Run Diagnostics" cmd="echo n | ware doctor"    onClick={run} icon="🩺"/>
         <Btn label="Update System"   cmd="ware update"    onClick={run} icon="↑" variant="success"/>
         <Btn label="Sync Mirrors"    cmd="ware sync"      onClick={run} icon="⟳"/>
         <Btn label="Clean Cache"     cmd="ware clean"     onClick={run} icon="✦"/>
@@ -1274,7 +1314,7 @@ function SystemSection({run}) {
     <div>
       <Hdr title="System Tools" sub="Maintenance utilities and package manager extensions."/>
       <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:"10px"}}>
-        <Btn label="Run Doctor"         cmd="ware doctor"      onClick={run} icon="🩺"/>
+        <Btn label="Run Doctor"         cmd="echo n | ware doctor"      onClick={run} icon="🩺"/>
         <Btn label="Sync Mirrors"       cmd="ware sync"        onClick={run} icon="⟳"/>
         <Btn label="Clean Cache"        cmd="ware clean"       onClick={run} icon="✦"/>
         <Btn label="Autoremove Orphans" cmd="ware autoremove"  onClick={run} icon="✖"/>
