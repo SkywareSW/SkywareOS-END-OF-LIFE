@@ -19,6 +19,7 @@
     --lavender: #b4befe;
     --mauve:    #cba6f7;
     --red:      #f38ba8;
+    --crimson:  #e05c7a;
     --yellow:   #f9e2af;
     --peach:    #fab387;
   }
@@ -67,9 +68,9 @@
   .nav-badge {
     font-size: 0.6rem; letter-spacing: 0.1em;
     padding: 0.2rem 0.7rem; border-radius: 999px;
-    background: rgba(166,227,161,0.08);
-    border: 1px solid rgba(166,227,161,0.2);
-    color: var(--green);
+    background: rgba(224,92,122,0.08);
+    border: 1px solid rgba(224,92,122,0.25);
+    color: var(--crimson);
   }
 
   /* ── ORBS ── */
@@ -79,9 +80,9 @@
     animation: drift 14s ease-in-out infinite alternate;
     pointer-events: none;
   }
-  .orb1 { width:600px;height:600px; background:radial-gradient(circle,var(--green),transparent 70%); top:-200px;right:-100px; animation-delay:0s; }
-  .orb2 { width:400px;height:400px; background:radial-gradient(circle,var(--teal),transparent 70%); bottom:-100px;left:-80px; animation-delay:-5s; }
-  .orb3 { width:280px;height:280px; background:radial-gradient(circle,var(--blue),transparent 70%); top:40%;left:35%; animation-delay:-9s; }
+  .orb1 { width:600px;height:600px; background:radial-gradient(circle,var(--crimson),transparent 70%); top:-200px;right:-100px; animation-delay:0s; }
+  .orb2 { width:400px;height:400px; background:radial-gradient(circle,var(--red),transparent 70%); bottom:-100px;left:-80px; animation-delay:-5s; }
+  .orb3 { width:280px;height:280px; background:radial-gradient(circle,var(--mauve),transparent 70%); top:40%;left:35%; animation-delay:-9s; }
   @keyframes drift {
     from { transform:translate(0,0) scale(1); }
     to   { transform:translate(30px,25px) scale(1.08); }
@@ -137,15 +138,15 @@
     margin-top: 1.2rem;
     font-size: 0.7rem; letter-spacing: 0.12em;
     padding: 0.35rem 1rem; border-radius: 999px;
-    background: rgba(166,227,161,0.08);
-    border: 1px solid rgba(166,227,161,0.2);
-    color: var(--green);
+    background: rgba(224,92,122,0.08);
+    border: 1px solid rgba(224,92,122,0.25);
+    color: var(--crimson);
     animation: fadeUp 0.4s 0.15s ease both; opacity: 0;
   }
   .version-dot {
     width: 6px; height: 6px; border-radius: 50%;
-    background: var(--green);
-    box-shadow: 0 0 6px rgba(166,227,161,0.8);
+    background: var(--crimson);
+    box-shadow: 0 0 6px rgba(224,92,122,0.8);
     animation: pulse 2s ease-in-out infinite;
   }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
@@ -241,6 +242,7 @@
   .sy { color: var(--yellow); }
   .st { color: var(--teal); }
   .sp { color: var(--mauve); }
+  .scr { color: var(--crimson); }
 
   /* ── SECTIONS COMMON ── */
   .section {
@@ -277,7 +279,7 @@
     overflow: hidden;
     transition: border-color 0.2s;
   }
-  .changelog-item:hover { border-color: rgba(166,227,161,0.2); }
+  .changelog-item:hover { border-color: rgba(224,92,122,0.2); }
 
   .cl-header {
     display: flex; align-items: center; gap: 1rem;
@@ -301,9 +303,10 @@
     text-transform: uppercase;
     padding: 2px 8px; border-radius: 999px;
   }
-  .cn-red    { color:var(--red);    background:rgba(243,139,168,0.08); border:1px solid rgba(243,139,168,0.2); }
-  .cn-green  { color:var(--green);  background:rgba(166,227,161,0.08); border:1px solid rgba(166,227,161,0.2); }
-  .cn-blue   { color:var(--blue);   background:rgba(137,180,250,0.08); border:1px solid rgba(137,180,250,0.2); }
+  .cn-red     { color:var(--red);     background:rgba(243,139,168,0.08); border:1px solid rgba(243,139,168,0.2); }
+  .cn-crimson { color:var(--crimson); background:rgba(224,92,122,0.08);  border:1px solid rgba(224,92,122,0.25); }
+  .cn-green   { color:var(--green);   background:rgba(166,227,161,0.08); border:1px solid rgba(166,227,161,0.2); }
+  .cn-blue    { color:var(--blue);    background:rgba(137,180,250,0.08); border:1px solid rgba(137,180,250,0.2); }
 
   .cl-arrow {
     margin-left: auto; color: var(--muted); font-size: 0.8rem;
@@ -317,7 +320,7 @@
     transition: max-height 0.35s ease, padding 0.2s;
   }
   .changelog-item.open .cl-body {
-    max-height: 400px;
+    max-height: 600px;
     padding: 1rem 1.4rem;
   }
 
@@ -330,8 +333,9 @@
   .cl-entry:last-child { border-bottom: none; }
   .cl-bullet {
     width: 5px; height: 5px; border-radius: 50%;
-    background: var(--green); flex-shrink: 0; margin-top: 6px;
+    background: var(--crimson); flex-shrink: 0; margin-top: 6px;
   }
+  .cl-bullet-red { background: var(--red); }
   .cl-entry:hover { color: var(--text); }
 
   /* ── WARE COMMANDS ── */
@@ -506,7 +510,7 @@
 <header>
   <a class="logo" href="https://SkywareSW.github.io">Skyware<span>OS</span></a>
   <nav>
-    <span class="nav-badge">v0.7 red</span>
+    <span class="nav-badge">v1.0 crimson</span>
     <a href="#install">install</a>
     <a href="#changelog">changelog</a>
     <a href="#commands">ware</a>
@@ -534,7 +538,7 @@
 
     <div class="version-pill">
       <span class="version-dot"></span>
-      current: Red v0.7
+      current: Crimson v1.0
     </div>
 
     <p class="hero-desc">
@@ -569,15 +573,15 @@
         <div class="sm">&nbsp;</div>
         <div><span class="sg">❯ </span><span style="color:var(--text)">./skyware-setup.sh</span></div>
         <div class="sm">&nbsp;</div>
-        <div><span class="st">  skywareOS v0.7(Red)</span></div>
+        <div><span class="scr">  skywareOS v1.0(Crimson)</span></div>
         <div><span class="sm">  setting up your system...</span></div>
         <div><span class="sg">  ✓ packages installed</span></div>
         <div><span class="sg">  ✓ ware configured</span></div>
         <div><span class="sg">  ✓ hyprland ready</span></div>
         <div class="sm">&nbsp;</div>
         <div><span class="sg">❯ </span><span style="color:var(--blue)">ware status</span></div>
-        <div><span class="sp">  channel</span> <span class="sm">~</span> <span style="color:var(--text)">release</span></div>
-        <div><span class="sp">  version</span> <span class="sm">~</span> <span style="color:var(--text)">Red v0.7</span></div>
+        <div><span class="sp">  channel</span> <span class="sm">~</span> <span style="color:var(--text)">crimson</span></div>
+        <div><span class="sp">  version</span> <span class="sm">~</span> <span style="color:var(--text)">Crimson v1.0</span></div>
       </div>
     </div>
   </div>
@@ -660,19 +664,16 @@
 <!-- ── CHANGELOG ── -->
 <section class="section" id="changelog">
   <div class="section-label">update logs</div>
-  <h2 class="section-title">version <span style="color:var(--red)">history</span></h2>
+  <h2 class="section-title">version <span style="color:var(--crimson)">history</span></h2>
 
-  <div style="
-    display:flex; flex-wrap:wrap; gap:0.6rem;
-    margin-bottom: 2rem;
-  ">
+  <div style="display:flex; flex-wrap:wrap; gap:0.6rem; margin-bottom: 2rem;">
     <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.9rem;border-radius:999px;background:rgba(243,139,168,0.08);border:1px solid rgba(243,139,168,0.2);font-size:0.65rem;letter-spacing:0.1em;">
       <span style="width:7px;height:7px;border-radius:50%;background:var(--red);display:inline-block"></span>
       <span style="color:var(--red)">0.x.x</span><span style="color:var(--muted)">— Red</span>
     </div>
-    <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.9rem;border-radius:999px;background:rgba(243,100,100,0.08);border:1px solid rgba(243,100,100,0.2);font-size:0.65rem;letter-spacing:0.1em;">
-      <span style="width:7px;height:7px;border-radius:50%;background:#f05e5e;display:inline-block"></span>
-      <span style="color:#f05e5e">1.x.x</span><span style="color:var(--muted)">— Crimson</span>
+    <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.9rem;border-radius:999px;background:rgba(224,92,122,0.08);border:1px solid rgba(224,92,122,0.25);font-size:0.65rem;letter-spacing:0.1em;">
+      <span style="width:7px;height:7px;border-radius:50%;background:var(--crimson);display:inline-block"></span>
+      <span style="color:var(--crimson)">1.x.x</span><span style="color:var(--muted)">— Crimson</span>
     </div>
     <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.9rem;border-radius:999px;background:rgba(250,179,135,0.08);border:1px solid rgba(250,179,135,0.2);font-size:0.65rem;letter-spacing:0.1em;">
       <span style="width:7px;height:7px;border-radius:50%;background:var(--peach);display:inline-block"></span>
@@ -685,19 +686,49 @@
 
   <div class="changelog-list">
 
+    <!-- v1.0 CRIMSON — LATEST -->
     <div class="changelog-item open">
       <div class="cl-header" onclick="toggleCl(this)">
-        <span class="cl-version" style="color:var(--red)">v0.7</span>
-        <span class="cl-codename cn-red">Red</span>
+        <span class="cl-version" style="color:var(--crimson)">v1.0</span>
+        <span class="cl-codename cn-crimson">Crimson</span>
         <span style="font-size:0.65rem;color:var(--muted);margin-left:0.5rem">latest</span>
         <span class="cl-arrow">▾</span>
       </div>
       <div class="cl-body">
-        <div class="cl-entry"><span class="cl-bullet"></span><span>Added command to open the SkywareOS git website: <code style="color:var(--teal)">ware git</code></span></div>
-        <div class="cl-entry"><span class="cl-bullet"></span><span>Detects if DE is installed, if so, skip DE selection (makes ware upgrade go by smoother)</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Major milestone release — SkywareOS 1.0 Crimson</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Overhauled <code style="color:var(--teal)">ware</code> with full GUI Settings app — manage packages, theming, power, display managers and more from a sleek Electron interface</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Added AI-powered system doctor via <code style="color:var(--teal)">ware doctor</code> — detects and repairs broken packages, corrupted deps, and firewall issues</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>SDDM dark theme with custom SkywareOS branding applied automatically on install</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>KDE Kickoff start button now shows the SkywareOS logo</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Plymouth bootsplash with SkywareOS logo and animated Pac-Man progress bar</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>New <code style="color:var(--teal)">ware backup</code> — Timeshift-backed snapshots with create, list, and restore commands</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>New <code style="color:var(--teal)">ware benchmark</code> — CPU, memory, disk, and GPU benchmarking suite</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>New <code style="color:var(--teal)">ware repair</code> — one command to fix pacman locks, broken keyring, failed services, and more</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>GameMode + MangoHud integration with <code style="color:var(--teal)">ware setup gaming</code></span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Full zsh shell setup — plugins, fzf, zoxide, eza, tmux, and custom MOTD with system info</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>AppArmor, SSH hardening, USBGuard, and automatic security updates configured out of the box</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Bluetooth, CUPS printing, touchpad gestures, Docker/Podman support added to setup</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Auto-mount with udiskie, fingerprint auth with fprint, multi-monitor with autorandr</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Limine bootloader now shows SkywareOS branding and logo</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>OTA update notifier — desktop notification when a new SkywareOS version is available</span></div>
+        <div class="cl-entry"><span class="cl-bullet"></span><span>Welcome app shown on first login with setup tips and quick actions</span></div>
       </div>
     </div>
 
+    <!-- v0.7 RED -->
+    <div class="changelog-item">
+      <div class="cl-header" onclick="toggleCl(this)">
+        <span class="cl-version" style="color:var(--red)">v0.7</span>
+        <span class="cl-codename cn-red">Red</span>
+        <span class="cl-arrow">▾</span>
+      </div>
+      <div class="cl-body">
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>Added command to open the SkywareOS git website: <code style="color:var(--teal)">ware git</code></span></div>
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>Detects if DE is installed, if so, skip DE selection (makes <code style="color:var(--teal)">ware upgrade</code> go by smoother)</span></div>
+      </div>
+    </div>
+
+    <!-- v0.6.1 RED -->
     <div class="changelog-item">
       <div class="cl-header" onclick="toggleCl(this)">
         <span class="cl-version" style="color:var(--red)">v0.6.1</span>
@@ -705,10 +736,11 @@
         <span class="cl-arrow">▾</span>
       </div>
       <div class="cl-body">
-        <div class="cl-entry"><span class="cl-bullet"></span><span>Added version display to <code style="color:var(--teal)">ware status</code></span></div>
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>Added version display to <code style="color:var(--teal)">ware status</code></span></div>
       </div>
     </div>
 
+    <!-- v0.6 RED -->
     <div class="changelog-item">
       <div class="cl-header" onclick="toggleCl(this)">
         <span class="cl-version" style="color:var(--red)">v0.6</span>
@@ -716,12 +748,13 @@
         <span class="cl-arrow">▾</span>
       </div>
       <div class="cl-body">
-        <div class="cl-entry"><span class="cl-bullet"></span><span>Added snap support via <code style="color:var(--teal)">ware setup snap</code></span></div>
-        <div class="cl-entry"><span class="cl-bullet"></span><span>GPU drivers now automatically detected — no more manual selection</span></div>
-        <div class="cl-entry"><span class="cl-bullet"></span><span>Dramatically improved <code style="color:var(--teal)">ware search</code> accuracy and speed</span></div>
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>Added snap support via <code style="color:var(--teal)">ware setup snap</code></span></div>
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>GPU drivers now automatically detected — no more manual selection</span></div>
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>Dramatically improved <code style="color:var(--teal)">ware search</code> accuracy and speed</span></div>
       </div>
     </div>
 
+    <!-- v0.5 RED -->
     <div class="changelog-item">
       <div class="cl-header" onclick="toggleCl(this)">
         <span class="cl-version" style="color:var(--red)">v0.5</span>
@@ -729,9 +762,9 @@
         <span class="cl-arrow">▾</span>
       </div>
       <div class="cl-body">
-        <div class="cl-entry"><span class="cl-bullet"></span><span>Significantly faster installation — added <code style="color:var(--teal)">--needed</code> flag to most install commands</span></div>
-        <div class="cl-entry"><span class="cl-bullet"></span><span>Fixed installer: switched to <code style="color:var(--teal)">sed</code> (was broken in previous builds)</span></div>
-        <div class="cl-entry"><span class="cl-bullet"></span><span>General ware performance optimizations</span></div>
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>Significantly faster installation — added <code style="color:var(--teal)">--needed</code> flag to most install commands</span></div>
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>Fixed installer: switched to <code style="color:var(--teal)">sed</code> (was broken in previous builds)</span></div>
+        <div class="cl-entry"><span class="cl-bullet cl-bullet-red"></span><span>General ware performance optimizations</span></div>
       </div>
     </div>
 
@@ -761,9 +794,16 @@
     <div class="cmd-item"><span class="cmd-name">ware switch</span><span class="cmd-desc">switches between Release and Testing channels</span></div>
     <div class="cmd-item"><span class="cmd-name">ware git</span><span class="cmd-desc">opens the SkywareOS git website in the default browser</span></div>
     <div class="cmd-item"><span class="cmd-name">ware doctor</span><span class="cmd-desc">finds and fixes corrupt or broken packages and dependencies, checks firewall</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware repair</span><span class="cmd-desc">fixes pacman locks, broken keyring, failed services, and common system issues</span></div>
     <div class="cmd-item"><span class="cmd-name">ware clean</span><span class="cmd-desc">removes unused repositories and packages</span></div>
     <div class="cmd-item"><span class="cmd-name">ware autoremove</span><span class="cmd-desc">automatically removes unused packages</span></div>
     <div class="cmd-item"><span class="cmd-name">ware sync</span><span class="cmd-desc">syncs mirrors for faster package downloads</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware benchmark</span><span class="cmd-desc">runs CPU, memory, disk, and GPU benchmarks and shows a summary report</span></div>
+
+    <div class="cmd-group-label">backup</div>
+    <div class="cmd-item"><span class="cmd-name">ware backup create</span><span class="cmd-desc">takes a Timeshift snapshot of the current system state</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware backup list</span><span class="cmd-desc">lists all available system snapshots</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware backup restore</span><span class="cmd-desc">interactively restore a previous system snapshot</span></div>
 
     <div class="cmd-group-label">power</div>
     <div class="cmd-item"><span class="cmd-name">ware power balanced</span><span class="cmd-desc">switch to balanced power mode</span></div>
@@ -778,6 +818,7 @@
     <div class="cmd-group-label">setup</div>
     <div class="cmd-item"><span class="cmd-name">ware setup hyprland</span><span class="cmd-desc">automatically sets up hyprland with jakoolit's dotfiles</span></div>
     <div class="cmd-item"><span class="cmd-name">ware setup lazyvim</span><span class="cmd-desc">automatically sets up LazyVim neovim config</span></div>
+    <div class="cmd-item"><span class="cmd-name">ware setup gaming</span><span class="cmd-desc">installs GameMode, MangoHud, Proton and Wine for gaming</span></div>
     <div class="cmd-item"><span class="cmd-name">ware setup niri</span><span class="cmd-desc">sets up Niri window manager <span style="color:var(--yellow)">(experimental)</span></span></div>
     <div class="cmd-item"><span class="cmd-name">ware setup mango</span><span class="cmd-desc">sets up MangoWC <span style="color:var(--yellow)">(experimental)</span></span></div>
     <div class="cmd-item"><span class="cmd-name">ware setup snap</span><span class="cmd-desc">installs and enables the Snap package manager</span></div>
