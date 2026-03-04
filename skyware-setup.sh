@@ -98,11 +98,11 @@ if [ -n "$LIMINE_CONF" ]; then
     LIMINE_DIR=$(dirname "$LIMINE_CONF")
 
     # Generate a 1920x1080 boot background with the Skyware logo centered
-    if [ -f assets/skywareos-logo.svg ]; then
+    if [ -f assets/skywareos.svg ]; then
         sudo pacman -S --noconfirm --needed imagemagick librsvg
 
         # Convert SVG logo to PNG at display size
-        sudo rsvg-convert -w 300 -h 300 assets/skywareos-logo.svg \
+        sudo rsvg-convert -w 300 -h 300 assets/skywareos.svg \
             -o /tmp/skyware-logo-300.png
 
         # Composite onto a dark background (1920x1080)
@@ -122,7 +122,7 @@ if [ -n "$LIMINE_CONF" ]; then
 
         echo "✔ Limine boot background set to Skyware logo"
     else
-        echo "⚠ assets/skywareos-logo.svg not found — skipping Limine logo"
+        echo "⚠ assets/skywareos.svg not found — skipping Limine logo"
     fi
 else
     echo "⚠ Limine config not found — skipping bootloader branding"
@@ -140,14 +140,14 @@ THEME_DIR="/usr/share/plymouth/themes/skywareos"
 sudo mkdir -p "$THEME_DIR"
 
 # Convert logo SVG → PNG for Plymouth (512x512 and a smaller 128x128 spinner base)
-if [ -f assets/skywareos-logo.svg ]; then
-    sudo rsvg-convert -w 512 -h 512 assets/skywareos-logo.svg \
+if [ -f assets/skywareos.svg ]; then
+    sudo rsvg-convert -w 512 -h 512 assets/skywareos.svg \
         -o "$THEME_DIR/logo.png"
-    sudo rsvg-convert -w 128 -h 128 assets/skywareos-logo.svg \
+    sudo rsvg-convert -w 128 -h 128 assets/skywareos.svg \
         -o "$THEME_DIR/logo-small.png"
     echo "✔ Plymouth logo images generated"
 else
-    echo "⚠ assets/skywareos-logo.svg not found — Plymouth will show text-only splash"
+    echo "⚠ assets/skywareos.svg not found — Plymouth will show text-only splash"
 fi
 
 # Theme descriptor
