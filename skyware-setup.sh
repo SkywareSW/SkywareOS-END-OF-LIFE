@@ -490,7 +490,16 @@ if [ -n "$KICKOFF_ID" ]; then
 fi
 ENVEOF
 chmod +x "$HOME/.config/autostart-scripts/skyware-kickoff-icon.sh"
-echo "✔ KDE Kickoff icon will be set to skywareos-start on next login"
+
+# Also try to apply immediately if plasma config already exists
+APPLETSRC="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
+if [ -f "$APPLETSRC" ]; then
+    KICKOFF_ID=$(grep -B5 "org.kde.plasma.kickoff\|org.kde.plasma.kicker"         "$APPLETSRC" 2>/dev/null | grep -oP '(?<=\[Applets\]\[)[0-9]+' | tail -1)
+    if [ -n "$KICKOFF_ID" ]; then
+        kwriteconfig6             --file "$APPLETSRC"             --group "Applets" --group "$KICKOFF_ID"             --group "Configuration" --group "General"             --key "icon" "skywareos-start" 2>/dev/null &&             echo "✔ Kickoff icon patched immediately (applet $KICKOFF_ID)"
+    fi
+fi
+echo "✔ KDE Kickoff icon configured (applies on next login if not set now)"
 sudo pacman -S --noconfirm --needed sddm breeze sddm-kcm
 sudo mkdir -p /etc/sddm.conf.d
 # sddm theme configured by custom QML theme section below
@@ -839,16 +848,13 @@ polkit.addRule(function(action, subject) {
 POLKITEOF
 
 sudo tee /etc/sudoers.d/10-skyware > /dev/null << 'SUDOEOF'
-# SkywareOS Settings App — wheel users run system commands without password
-%wheel ALL=(ALL) NOPASSWD: /usr/local/bin/ware
-%wheel ALL=(ALL) NOPASSWD: /usr/bin/pacman
-%wheel ALL=(ALL) NOPASSWD: /usr/bin/flatpak
-%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl
-%wheel ALL=(ALL) NOPASSWD: /usr/bin/reflector
-%wheel ALL=(ALL) NOPASSWD: /usr/bin/checkupdates
+# SkywareOS — wheel users run all commands without password
+# Required for the Settings GUI (Electron has no tty for sudo prompts)
+%wheel ALL=(ALL) NOPASSWD: ALL
 SUDOEOF
 sudo chmod 440 /etc/sudoers.d/10-skyware
-echo "✔ Passwordless sudo configured for ware commands"
+# Validate the sudoers file before continuing
+sudo visudo -c -f /etc/sudoers.d/10-skyware && echo "✔ Passwordless sudo configured for wheel group" || echo "⚠ sudoers syntax error — removing" && sudo rm /etc/sudoers.d/10-skyware
 
 # ============================================================
 # SkywareOS Settings App (Electron + React)
