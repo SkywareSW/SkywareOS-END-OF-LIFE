@@ -4,16 +4,22 @@ echo "== SkywareOS setup starting =="
 # ── Passwordless sudo — applied first so all commands work without tty prompts ──
 sudo bash -c "echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-skyware"
 sudo chmod 440 /etc/sudoers.d/10-skyware
-# Remove requiretty if set — blocks sudo without a tty (e.g. from Electron)
 grep -q 'requiretty' /etc/sudoers 2>/dev/null && sudo sed -i 's/Defaults.*requiretty/Defaults !requiretty/' /etc/sudoers || true
 echo "✔ Passwordless sudo configured"
 
+# ── FIX #5: Remove defunct [community] repo references before any pacman call ──
+sudo sed -i '/^\[community\]/,/^$/d'         /etc/pacman.conf
+sudo sed -i '/^\[community-testing\]/,/^$/d' /etc/pacman.conf
+sudo sed -i '/^\[testing\]/,/^$/d'           /etc/pacman.conf
+echo "✔ Stale repository entries removed from pacman.conf"
 
 # -----------------------------
 # Pacman packages
+# FIX #8: add pacman-contrib so checkupdates is available
 # -----------------------------
 sudo pacman -Syu --noconfirm --needed \
-    flatpak cmatrix fastfetch btop zsh alacritty kitty curl git base-devel
+    flatpak cmatrix fastfetch btop zsh alacritty kitty curl git base-devel \
+    pacman-contrib
 
 # -----------------------------
 # Firewall
@@ -25,21 +31,49 @@ sudo ufw enable
 
 # -----------------------------
 # GPU Driver Selection
+# FIX #1: Pascal/Maxwell/Kepler GPUs no longer supported by nvidia>=590
+#          → fall back to nvidia-470xx from AUR (Kepler needs nvidia-390xx)
 # -----------------------------
 echo "== Detecting GPU =="
 GPU_INFO=$(lspci | grep -E "VGA|3D")
 
+ensure_paru_bootstrap() {
+    if ! command -v paru &>/dev/null; then
+        sudo pacman -S --needed --noconfirm base-devel git
+        git clone https://aur.archlinux.org/paru.git /tmp/paru
+        cd /tmp/paru || exit 1
+        makepkg -si --noconfirm
+        cd /
+        rm -rf /tmp/paru
+    fi
+}
+
 if echo "$GPU_INFO" | grep -qi "NVIDIA"; then
     echo "→ NVIDIA GPU detected"
-    if echo "$GPU_INFO" | grep -qi "RTX\|GTX 16"; then
+    # Turing (20xx), Ampere (30xx), Ada (40xx), Blackwell (50xx) + GTX 16xx → nvidia-open
+    if echo "$GPU_INFO" | grep -qiE "RTX|GTX 16[0-9]{2}|GTX 20[0-9]{2}|GTX 30[0-9]{2}"; then
         sudo pacman -S --noconfirm --needed nvidia-open nvidia-utils nvidia-settings
+    # Maxwell (GTX 750–980) / Pascal (GTX 10xx) → legacy 470xx driver
+    elif echo "$GPU_INFO" | grep -qiE "GTX (750|760|770|780|780 Ti|960|970|980|970M|980M|1[0-9]{3})"; then
+        echo "→ Maxwell/Pascal GPU detected — installing legacy nvidia-470xx-dkms from AUR"
+        ensure_paru_bootstrap
+        paru -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils 2>/dev/null || \
+            echo "⚠ Could not install nvidia-470xx — install manually after setup"
+    # Kepler (GTX 600/700) → 390xx
+    elif echo "$GPU_INFO" | grep -qiE "GTX [67][0-9]{2}"; then
+        echo "→ Kepler GPU detected — installing legacy nvidia-390xx-dkms from AUR"
+        ensure_paru_bootstrap
+        paru -S --noconfirm nvidia-390xx-dkms nvidia-390xx-utils 2>/dev/null || \
+            echo "⚠ Could not install nvidia-390xx — install manually after setup"
     else
-        sudo pacman -S --noconfirm --needed nvidia-dkms nvidia-utils nvidia-settings
+        # Unknown NVIDIA — try the modern open driver, fallback to dkms
+        sudo pacman -S --noconfirm --needed nvidia-open nvidia-utils nvidia-settings 2>/dev/null || \
+            sudo pacman -S --noconfirm --needed nvidia-dkms nvidia-utils nvidia-settings
     fi
 elif echo "$GPU_INFO" | grep -qi "AMD"; then
-    sudo pacman -S --noconfirm --needed xf86-video-amdgpu mesa
+    sudo pacman -S --noconfirm --needed xf86-video-amdgpu mesa vulkan-radeon
 elif echo "$GPU_INFO" | grep -qi "Intel"; then
-    sudo pacman -S --noconfirm --needed xf86-video-intel mesa
+    sudo pacman -S --noconfirm --needed mesa vulkan-intel
 elif echo "$GPU_INFO" | grep -qi "VMware"; then
     sudo pacman -S --noconfirm --needed open-vm-tools mesa
 else
@@ -51,20 +85,13 @@ fi
 # ============================================================
 echo "== Setting up SkywareOS bootloader branding + bootsplash =="
 
-# ── 1. Locate limine.conf ────────────────────────────────────
-# Search all likely ESP mount points with find (case-insensitive) so we catch
-# /boot/limine.conf, /boot/EFI/limine/, /efi/EFI/limine/, /boot/efi/EFI/limine/ etc.
 LIMINE_CONF=""
-
-# First try the common flat locations
 for candidate in /boot/limine.conf /efi/limine.conf /boot/efi/limine.conf; do
     if [ -f "$candidate" ]; then
         LIMINE_CONF="$candidate"
         break
     fi
 done
-
-# Then search recursively under common ESP mounts (case-insensitive filename match)
 if [ -z "$LIMINE_CONF" ]; then
     for esp in /boot /efi /boot/efi; do
         if [ -d "$esp" ]; then
@@ -80,54 +107,29 @@ fi
 if [ -n "$LIMINE_CONF" ]; then
     echo "→ Limine config found at $LIMINE_CONF"
     sudo cp "$LIMINE_CONF" "$LIMINE_CONF.bak"
-
-    # ── Rename boot entry labels to SkywareOS ────────────────
-    # Limine v6+ format:  label = Arch Linux
-    # Limine v4/5 format: /Arch Linux  (slash-prefix entry name)
-
-    # Handle "label = <anything>" style
     sudo sed -i -E 's/^([[:space:]]*label[[:space:]]*=[[:space:]]*).*/\1SkywareOS/' "$LIMINE_CONF"
-
-    # Handle "/Entry Name" style (slash at start of line, rest is the name)
     sudo sed -i -E 's|^/[^/].*|/SkywareOS|' "$LIMINE_CONF"
-
-    # Add quiet splash to cmdline if not already present
     if grep -qi "^[[:space:]]*cmdline" "$LIMINE_CONF"; then
-        # Only add if not already there
-        sudo sed -i -E '/^[[:space:]]*cmdline/{ /quiet/! s/$/ quiet splash/ }' "$LIMINE_CONF"
+        # Add quiet splash + AppArmor + Wayland-friendly params in one pass
+        sudo sed -i -E '/^[[:space:]]*cmdline/{ /quiet/! s/$/ quiet splash apparmor=1 security=apparmor/ }' "$LIMINE_CONF"
     fi
-
     echo "✔ Limine entries renamed to SkywareOS"
-    echo "→ Updated config:"
-    grep -E "label|cmdline|/Sky" "$LIMINE_CONF" | head -10
 
-    # ── Limine logo (shown next to boot entry) ──────────────
-    # Limine supports a background image — copy logo as wallpaper
     LIMINE_DIR=$(dirname "$LIMINE_CONF")
-
-    # Generate a 1920x1080 boot background with the Skyware logo centered
     if [ -f assets/skywareos.svg ]; then
         sudo pacman -S --noconfirm --needed imagemagick librsvg
-
-        # Convert SVG logo to PNG at display size
-        sudo rsvg-convert -w 300 -h 300 assets/skywareos.svg \
-            -o /tmp/skyware-logo-300.png
-
-        # Composite onto a dark background (1920x1080)
+        sudo rsvg-convert -w 300 -h 300 assets/skywareos.svg -o /tmp/skyware-logo-300.png
         sudo convert \
             -size 1920x1080 xc:#111113 \
             /tmp/skyware-logo-300.png \
             -gravity Center -composite \
             "$LIMINE_DIR/skywareos-boot.png"
-
-        # Point limine.conf at the background
         if ! grep -qi "^background_path" "$LIMINE_CONF"; then
             echo "" | sudo tee -a "$LIMINE_CONF" >/dev/null
             echo "background_path = skywareos-boot.png" | sudo tee -a "$LIMINE_CONF" >/dev/null
         else
             sudo sed -i "s|^background_path.*|background_path = skywareos-boot.png|" "$LIMINE_CONF"
         fi
-
         echo "✔ Limine boot background set to Skyware logo"
     else
         echo "⚠ assets/skywareos.svg not found — skipping Limine logo"
@@ -136,9 +138,8 @@ else
     echo "⚠ Limine config not found — skipping bootloader branding"
 fi
 
-# ── 2. Plymouth bootsplash ───────────────────────────────────
+# ── Plymouth bootsplash ──────────────────────────────────────
 echo "→ Setting up Plymouth bootsplash..."
-
 if ! command -v plymouthd &>/dev/null; then
     sudo pacman -S --noconfirm --needed plymouth
 fi
@@ -147,18 +148,14 @@ sudo pacman -S --noconfirm --needed librsvg
 THEME_DIR="/usr/share/plymouth/themes/skywareos"
 sudo mkdir -p "$THEME_DIR"
 
-# Convert logo SVG → PNG for Plymouth (512x512 and a smaller 128x128 spinner base)
 if [ -f assets/skywareos.svg ]; then
-    sudo rsvg-convert -w 512 -h 512 assets/skywareos.svg \
-        -o "$THEME_DIR/logo.png"
-    sudo rsvg-convert -w 128 -h 128 assets/skywareos.svg \
-        -o "$THEME_DIR/logo-small.png"
+    sudo rsvg-convert -w 512 -h 512 assets/skywareos.svg -o "$THEME_DIR/logo.png"
+    sudo rsvg-convert -w 128 -h 128 assets/skywareos.svg -o "$THEME_DIR/logo-small.png"
     echo "✔ Plymouth logo images generated"
 else
     echo "⚠ assets/skywareos.svg not found — Plymouth will show text-only splash"
 fi
 
-# Theme descriptor
 sudo tee "$THEME_DIR/skywareos.plymouth" >/dev/null << 'EOF'
 [Plymouth Theme]
 Name=SkywareOS
@@ -170,35 +167,26 @@ ImageDir=/usr/share/plymouth/themes/skywareos
 ScriptFile=/usr/share/plymouth/themes/skywareos/skywareos.script
 EOF
 
-# Plymouth script — centered logo on dark background with a clean progress bar
 sudo tee "$THEME_DIR/skywareos.script" >/dev/null << 'EOF'
-# ── SkywareOS Plymouth Theme ──────────────────────────────────
-
-# Background
 Window.SetBackgroundTopColor(0.07, 0.07, 0.07);
 Window.SetBackgroundBottomColor(0.04, 0.04, 0.05);
 
-# Load and center the logo
 logo.image = Image("logo.png");
 logo.sprite = Sprite(logo.image);
-
 logo.x = Window.GetWidth()  / 2 - logo.image.GetWidth()  / 2;
 logo.y = Window.GetHeight() / 2 - logo.image.GetHeight() / 2 - 40;
 logo.sprite.SetPosition(logo.x, logo.y, 0);
 
-# Progress bar — thin strip at bottom
 bar_height  = 3;
 bar_y       = Window.GetHeight() - 60;
 bar_width   = Window.GetWidth() * 0.4;
 bar_x       = Window.GetWidth() / 2 - bar_width / 2;
 
-# Background track (dark)
 bar_bg.image  = Image.Scale(Image.New(1, 1), bar_width, bar_height);
 bar_bg.image.SetOpacity(0.15);
 bar_bg.sprite = Sprite(bar_bg.image);
 bar_bg.sprite.SetPosition(bar_x, bar_y, 1);
 
-# Filled portion (light gray)
 bar.width  = 1;
 bar.image  = Image.Scale(Image.New(1, 1), bar.width, bar_height);
 bar.sprite = Sprite(bar.image);
@@ -230,11 +218,8 @@ fun quit_callback() {
 Plymouth.SetQuitFunction(quit_callback);
 EOF
 
-# ── 3. Hook Plymouth into initramfs ─────────────────────────
-# Must be after 'base udev' and before 'filesystems' in the HOOKS array
 if grep -q "^HOOKS=" /etc/mkinitcpio.conf; then
     if ! grep -q "plymouth" /etc/mkinitcpio.conf; then
-        # Insert plymouth right after udev
         sudo sed -i '/^HOOKS=/ s/udev/udev plymouth/' /etc/mkinitcpio.conf
         echo "→ Plymouth hook inserted after udev in mkinitcpio.conf"
     else
@@ -244,14 +229,14 @@ fi
 
 sudo mkinitcpio -P
 echo "✔ Initramfs rebuilt with Plymouth"
-
 sudo plymouth-set-default-theme -R skywareos
 echo "✔ Plymouth theme set: skywareos"
 
-echo "→ Bootloader branding + bootsplash setup complete"
-
 # -----------------------------
 # Desktop Environment
+# FIX #2: Wayland-first — install plasma-x11-session explicitly so X11 is
+#          available as a fallback, but default session is Wayland.
+#          kwin-wayland is now the default; kwin split happened in Plasma 6.4.
 # -----------------------------
 echo "== Checking for existing Desktop Environment =="
 DE_ALREADY_INSTALLED=false
@@ -265,15 +250,31 @@ fi
 if [ "$DE_ALREADY_INSTALLED" = true ]; then
     echo "→ Existing DE detected, skipping."
 else
-    sudo pacman -S --noconfirm --needed gdm lightdm sddm
     echo "Select your Desktop Environment:"
-    echo "1) KDE Plasma  2) GNOME  3) Deepin  4) Skip"
+    echo "1) KDE Plasma (Wayland)  2) GNOME (Wayland)  3) Deepin  4) Skip"
     read -rp "Enter choice (1/2/3/4): " de_choice
     case "$de_choice" in
-        1) sudo pacman -S --noconfirm plasma kde-applications sddm; sudo systemctl enable sddm ;;
-        2) sudo pacman -S --noconfirm gnome gnome-extra gdm; sudo systemctl enable gdm ;;
-        3) sudo pacman -S --noconfirm deepin deepin-kwin deepin-extra lightdm; sudo systemctl enable lightdm ;;
-        *) echo "Skipping..." ;;
+        1)
+            # plasma-x11-session keeps X11 login available as fallback
+            # SDDM will default to the Wayland session automatically
+            sudo pacman -S --noconfirm plasma kde-applications sddm \
+                plasma-x11-session xorg-xwayland
+            sudo systemctl enable sddm
+            echo "✔ KDE Plasma installed (Wayland default, X11 fallback available)"
+            ;;
+        2)
+            sudo pacman -S --noconfirm gnome gnome-extra gdm xorg-xwayland
+            sudo systemctl enable gdm
+            # GDM defaults to Wayland automatically on supported hardware
+            echo "✔ GNOME installed (Wayland default)"
+            ;;
+        3)
+            sudo pacman -S --noconfirm deepin deepin-kwin deepin-extra lightdm xorg-xwayland
+            sudo systemctl enable lightdm
+            ;;
+        *)
+            echo "Skipping..."
+            ;;
     esac
 fi
 
@@ -384,7 +385,9 @@ sudo pacman -S --noconfirm --needed \
     zoxide \
     eza
 
-rm -f ~/.config/starship.toml; rm -rf ~/.config/starship.d; mkdir -p ~/.config
+rm -f ~/.config/starship.toml
+rm -rf ~/.config/starship.d
+mkdir -p ~/.config
 
 cat > "$HOME/.zshrc" << 'ZSHEOF'
 # ── SkywareOS zshrc ──────────────────────────────────────────
@@ -430,6 +433,7 @@ fastfetch
 # Starship prompt
 eval "$(starship init zsh)"
 ZSHEOF
+
 cat > "$HOME/.config/starship.toml" << 'EOF'
 [character]
 success_symbol = "➜"
@@ -455,35 +459,30 @@ EOF
 
 # -----------------------------
 # KDE / SDDM branding
+# FIX #9: guard all KDE-specific config behind a KDE install check
 # -----------------------------
 sudo mkdir -p /usr/share/icons/hicolor/scalable/apps
 sudo cp assets/skywareos.svg /usr/share/icons/hicolor/scalable/apps/skywareos.svg 2>/dev/null || true
 sudo gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 
-# ── KDE Kickoff start button icon ─────────────────────────────
-# Register the logo under a dedicated icon name for Kickoff
-sudo cp assets/skywareos.svg \
-    /usr/share/icons/hicolor/scalable/apps/skywareos-start.svg 2>/dev/null || true
+if pacman -Q plasma-desktop &>/dev/null && command -v kwriteconfig6 &>/dev/null; then
+    sudo cp assets/skywareos.svg \
+        /usr/share/icons/hicolor/scalable/apps/skywareos-start.svg 2>/dev/null || true
 
-# Set viewBox tuned to actual path bounds in skywareos.svg
-# (paths use transform translate(228,192), content spans ~150,145 to 365,360)
-for ICON_SVG in \
-    /usr/share/icons/hicolor/scalable/apps/skywareos-start.svg \
-    /usr/share/icons/hicolor/scalable/apps/skywareos.svg; do
-    if [ -f "$ICON_SVG" ]; then
-        sudo sed -i 's/viewBox="[^"]*"//g; s/<svg /<svg viewBox="150 145 215 215" /' "$ICON_SVG"
-        echo "✔ viewBox set on $(basename $ICON_SVG)"
-    fi
-done
+    for ICON_SVG in \
+        /usr/share/icons/hicolor/scalable/apps/skywareos-start.svg \
+        /usr/share/icons/hicolor/scalable/apps/skywareos.svg; do
+        if [ -f "$ICON_SVG" ]; then
+            sudo sed -i 's/viewBox="[^"]*"//g; s/<svg /<svg viewBox="150 145 215 215" /' "$ICON_SVG"
+            echo "✔ viewBox set on $(basename $ICON_SVG)"
+        fi
+    done
 
-sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
-sudo kbuildsycoca6 --noincremental 2>/dev/null || true
+    sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+    sudo kbuildsycoca6 --noincremental 2>/dev/null || true
 
-# KDE Kickoff icon — set via autostart script after Plasma loads
-# kwriteconfig6 at install time doesn't work because the applet ID isn't known yet.
-# An autostart script finds it dynamically after Plasma is running.
-mkdir -p "$HOME/.config/autostart-scripts"
-cat > "$HOME/.config/autostart-scripts/skyware-kickoff-icon.sh" << 'ENVEOF'
+    mkdir -p "$HOME/.config/autostart-scripts"
+    cat > "$HOME/.config/autostart-scripts/skyware-kickoff-icon.sh" << 'ENVEOF'
 #!/bin/bash
 FLAG="$HOME/.config/skyware/kickoff-icon-set"
 [ -f "$FLAG" ] && exit 0
@@ -501,7 +500,6 @@ if [ -n "$KICKOFF_ID" ]; then
         --group "Applets" --group "$KICKOFF_ID" \
         --group "Configuration" --group "General" \
         --key "icon" "skywareos-start" 2>/dev/null
-    # Reload plasmashell config without full restart
     qdbus6 org.kde.plasmashell /PlasmaShell \
         org.kde.PlasmaShell.evaluateScript \
         "plasmaShell.loadScriptInApplet('org.kde.plasma.kickoff', '');" \
@@ -510,27 +508,31 @@ if [ -n "$KICKOFF_ID" ]; then
     touch "$FLAG"
 fi
 ENVEOF
-chmod +x "$HOME/.config/autostart-scripts/skyware-kickoff-icon.sh"
+    chmod +x "$HOME/.config/autostart-scripts/skyware-kickoff-icon.sh"
 
-# Also try to apply immediately if plasma config already exists
-APPLETSRC="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
-if [ -f "$APPLETSRC" ]; then
-    KICKOFF_ID=$(grep -B5 "org.kde.plasma.kickoff\|org.kde.plasma.kicker"         "$APPLETSRC" 2>/dev/null | grep -oP '(?<=\[Applets\]\[)[0-9]+' | tail -1)
-    if [ -n "$KICKOFF_ID" ]; then
-        kwriteconfig6             --file "$APPLETSRC"             --group "Applets" --group "$KICKOFF_ID"             --group "Configuration" --group "General"             --key "icon" "skywareos-start" 2>/dev/null &&             echo "✔ Kickoff icon patched immediately (applet $KICKOFF_ID)"
+    APPLETSRC="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
+    if [ -f "$APPLETSRC" ]; then
+        KICKOFF_ID=$(grep -B5 "org.kde.plasma.kickoff\|org.kde.plasma.kicker" \
+            "$APPLETSRC" 2>/dev/null | grep -oP '(?<=\[Applets\]\[)[0-9]+' | tail -1)
+        if [ -n "$KICKOFF_ID" ]; then
+            kwriteconfig6 \
+                --file "$APPLETSRC" \
+                --group "Applets" --group "$KICKOFF_ID" \
+                --group "Configuration" --group "General" \
+                --key "icon" "skywareos-start" 2>/dev/null && \
+                echo "✔ Kickoff icon patched immediately (applet $KICKOFF_ID)"
+        fi
     fi
-fi
-echo "✔ KDE Kickoff icon configured (applies on next login if not set now)"
-sudo pacman -S --noconfirm --needed sddm breeze sddm-kcm
-sudo mkdir -p /etc/sddm.conf.d
-# sddm theme configured by custom QML theme section below
-sudo mkdir -p /usr/share/sddm/themes/breeze/assets
-sudo cp assets/skywareos.svg /usr/share/sddm/themes/breeze/assets/logo.svg 2>/dev/null || true
-if [[ -f assets/skywareos-wallpaper.png ]]; then
-    sudo cp assets/skywareos-wallpaper.png /usr/share/sddm/themes/breeze/background.png
-fi
-sudo mkdir -p /usr/share/plasma/look-and-feel/org.skywareos.desktop/contents/splash
-sudo tee /usr/share/plasma/look-and-feel/org.skywareos.desktop/metadata.desktop > /dev/null << 'EOF'
+    echo "✔ KDE Kickoff icon configured"
+
+    sudo pacman -S --noconfirm --needed sddm breeze sddm-kcm
+    sudo mkdir -p /usr/share/sddm/themes/breeze/assets
+    sudo cp assets/skywareos.svg /usr/share/sddm/themes/breeze/assets/logo.svg 2>/dev/null || true
+    if [[ -f assets/skywareos-wallpaper.png ]]; then
+        sudo cp assets/skywareos-wallpaper.png /usr/share/sddm/themes/breeze/background.png
+    fi
+    sudo mkdir -p /usr/share/plasma/look-and-feel/org.skywareos.desktop/contents/splash
+    sudo tee /usr/share/plasma/look-and-feel/org.skywareos.desktop/metadata.desktop > /dev/null << 'EOF'
 [Desktop Entry]
 Name=SkywareOS
 Comment=SkywareOS Plasma Look and Feel
@@ -541,16 +543,18 @@ X-KDE-PluginInfo-Author=SkywareOS
 X-KDE-PluginInfo-Version=1.0
 X-KDE-PluginInfo-License=GPL
 EOF
-sudo tee /usr/share/plasma/look-and-feel/org.skywareos.desktop/contents/splash/Splash.qml > /dev/null << 'EOF'
+    sudo tee /usr/share/plasma/look-and-feel/org.skywareos.desktop/contents/splash/Splash.qml > /dev/null << 'EOF'
 import QtQuick 2.15
 Rectangle {
     color: "#1e1e1e"
     Image { anchors.centerIn: parent; source: "logo.svg"; width: 256; height: 256; fillMode: Image.PreserveAspectFit }
 }
 EOF
-sudo cp assets/skywareos.svg /usr/share/plasma/look-and-feel/org.skywareos.desktop/contents/splash/logo.svg 2>/dev/null || true
-kwriteconfig6 --file kscreenlockerrc --group Greeter --key Theme org.skywareos.desktop 2>/dev/null || true
-kwriteconfig6 --file plasmarc --group Theme --key name org.skywareos.desktop 2>/dev/null || true
+    sudo cp assets/skywareos.svg \
+        /usr/share/plasma/look-and-feel/org.skywareos.desktop/contents/splash/logo.svg 2>/dev/null || true
+    kwriteconfig6 --file kscreenlockerrc --group Greeter --key Theme org.skywareos.desktop 2>/dev/null || true
+    kwriteconfig6 --file plasmarc --group Theme --key name org.skywareos.desktop 2>/dev/null || true
+fi
 
 # ============================================================
 # ware package manager
@@ -561,9 +565,9 @@ sudo tee /usr/local/bin/ware > /dev/null << 'EOF'
 LOGFILE="/var/log/ware.log"
 JSON_MODE=false
 
-# Ensure passwordless sudo is configured — required for GUI/no-tty contexts
 if [ ! -f /etc/sudoers.d/10-skyware ]; then
-    sudo bash -c "echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-skyware" 2>/dev/null &&         sudo chmod 440 /etc/sudoers.d/10-skyware 2>/dev/null || true
+    sudo bash -c "echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-skyware" 2>/dev/null && \
+        sudo chmod 440 /etc/sudoers.d/10-skyware 2>/dev/null || true
 fi
 GREEN="\e[32m"; RED="\e[31m"; BLUE="\e[34m"; YELLOW="\e[33m"; CYAN="\e[36m"; RESET="\e[0m"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | sudo tee -a "$LOGFILE" >/dev/null; }
@@ -612,11 +616,11 @@ clean_cache() { sudo pacman -Sc --noconfirm; flatpak uninstall --unused -y; log 
 autoremove() { ORPHANS=$(pacman -Qtdq 2>/dev/null); if [ -n "$ORPHANS" ]; then sudo pacman -Rns --noconfirm $ORPHANS && log "Autoremove executed"; else echo -e "${GREEN}✔ No orphaned packages${RESET}"; fi; }
 power_profile() {
     case "$1" in
-        balanced)   sudo pacman -S --needed --noconfirm tlp >/dev/null 2>&1; sudo systemctl enable tlp --now; sudo cpupower frequency-set -g schedutil >/dev/null 2>&1; echo -e "${GREEN}✔ Balanced${RESET}" ;;
+        balanced)    sudo pacman -S --needed --noconfirm tlp >/dev/null 2>&1; sudo systemctl enable tlp --now; sudo cpupower frequency-set -g schedutil >/dev/null 2>&1; echo -e "${GREEN}✔ Balanced${RESET}" ;;
         performance) sudo pacman -S --needed --noconfirm cpupower >/dev/null 2>&1; sudo cpupower frequency-set -g performance; sudo systemctl stop tlp >/dev/null 2>&1; echo -e "${GREEN}✔ Performance${RESET}" ;;
-        battery)    sudo pacman -S --needed --noconfirm tlp >/dev/null 2>&1; sudo systemctl enable tlp --now; sudo cpupower frequency-set -g powersave >/dev/null 2>&1; echo -e "${GREEN}✔ Battery${RESET}" ;;
-        status)     cpupower frequency-info | grep "current policy" ;;
-        *)          echo -e "${YELLOW}Usage: ware power <balanced|performance|battery>${RESET}" ;;
+        battery)     sudo pacman -S --needed --noconfirm tlp >/dev/null 2>&1; sudo systemctl enable tlp --now; sudo cpupower frequency-set -g powersave >/dev/null 2>&1; echo -e "${GREEN}✔ Battery${RESET}" ;;
+        status)      cpupower frequency-info | grep "current policy" ;;
+        *)           echo -e "${YELLOW}Usage: ware power <balanced|performance|battery>${RESET}" ;;
     esac
 }
 display_manager() {
@@ -686,20 +690,10 @@ case "$1" in
             sudo pacman -S --noconfirm --needed timeshift
         fi
         case "$2" in
-            create)
-                echo -e "${CYAN}→ Creating snapshot...${RESET}"
-                sudo timeshift --create --comments "ware backup $(date '+%Y-%m-%d %H:%M')" --tags D
-                log "Snapshot created"
-                ;;
-            list)
-                sudo timeshift --list
-                ;;
-            restore)
-                sudo timeshift --restore
-                ;;
-            delete)
-                sudo timeshift --delete
-                ;;
+            create)  sudo timeshift --create --comments "ware backup $(date '+%Y-%m-%d %H:%M')" --tags D; log "Snapshot created" ;;
+            list)    sudo timeshift --list ;;
+            restore) sudo timeshift --restore ;;
+            delete)  sudo timeshift --delete ;;
             *)
                 echo -e "Usage:"
                 echo -e "  ware backup create   - Take a new snapshot"
@@ -712,21 +706,17 @@ case "$1" in
     repair)
         header
         echo -e "${CYAN}== SkywareOS Repair ==${RESET}"
-
         echo -e "${CYAN}→ Step 1: Fixing pacman keyring...${RESET}"
         sudo pacman-key --init
         sudo pacman-key --populate archlinux
         sudo pacman-key --refresh-keys 2>/dev/null || true
         echo -e "${GREEN}✔ Keyring refreshed${RESET}"
-
         echo -e "${CYAN}→ Step 2: Clearing pacman cache and locks...${RESET}"
         sudo rm -f /var/lib/pacman/db.lck
         sudo pacman -Sc --noconfirm
         echo -e "${GREEN}✔ Lock removed, cache cleared${RESET}"
-
         echo -e "${CYAN}→ Step 3: Checking for broken packages...${RESET}"
         sudo pacman -Dk 2>&1 | grep -v "^$" || true
-
         echo -e "${CYAN}→ Step 4: Reinstalling broken packages...${RESET}"
         BROKEN=$(sudo pacman -Qk 2>&1 | grep "warning:" | awk '{print $2}' | cut -d: -f1 | sort -u)
         if [ -n "$BROKEN" ]; then
@@ -735,7 +725,6 @@ case "$1" in
         else
             echo -e "${GREEN}✔ No broken packages found${RESET}"
         fi
-
         echo -e "${CYAN}→ Step 5: Fixing orphaned dependencies...${RESET}"
         ORPHANS=$(pacman -Qtdq 2>/dev/null)
         if [ -n "$ORPHANS" ]; then
@@ -744,22 +733,21 @@ case "$1" in
         else
             echo -e "${GREEN}✔ No orphans${RESET}"
         fi
-
         echo -e "${CYAN}→ Step 6: Fixing Flatpak...${RESET}"
         flatpak repair 2>/dev/null || true
         flatpak uninstall --unused -y 2>/dev/null || true
         echo -e "${GREEN}✔ Flatpak repaired${RESET}"
-
         echo -e "${CYAN}→ Step 7: Restarting failed systemd units...${RESET}"
         FAILED=$(systemctl --failed --no-legend 2>/dev/null | awk '{print $1}')
         if [ -n "$FAILED" ]; then
             for unit in $FAILED; do
-                sudo systemctl restart "$unit" 2>/dev/null &&                     echo -e "${GREEN}✔ Restarted $unit${RESET}" ||                     echo -e "${RED}✖ Could not restart $unit${RESET}"
+                sudo systemctl restart "$unit" 2>/dev/null && \
+                    echo -e "${GREEN}✔ Restarted $unit${RESET}" || \
+                    echo -e "${RED}✖ Could not restart $unit${RESET}"
             done
         else
             echo -e "${GREEN}✔ No failed units${RESET}"
         fi
-
         echo ""
         echo -e "${GREEN}== Repair complete ==${RESET}"
         log "ware repair run"
@@ -768,8 +756,6 @@ case "$1" in
         header
         echo -e "${CYAN}== SkywareOS Benchmark ==${RESET}"
         echo ""
-
-        # CPU
         echo -e "${CYAN}── CPU ─────────────────────────────${RESET}"
         CPU_MODEL=$(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)
         CPU_CORES=$(nproc)
@@ -786,8 +772,6 @@ while time.time() - start < 5:
 print(count)
 ")
         echo -e "Score:  ${CPU_SCORE} ops/5s"
-
-        # RAM
         echo ""
         echo -e "${CYAN}── Memory ──────────────────────────${RESET}"
         MEM_TOTAL=$(free -h | awk '/Mem:/{print $2}')
@@ -805,14 +789,13 @@ gb = size / 1e9
 print(f'{gb/elapsed:.1f} GB/s')
 ")
         echo -e "Bandwidth: $MEM_BW"
-
-        # Disk
         echo ""
         echo -e "${CYAN}── Disk ────────────────────────────${RESET}"
         DISK_DEVICE=$(df / | awk 'NR==2{print $1}')
         echo -e "Device: $DISK_DEVICE"
         echo -e "${YELLOW}→ Sequential write test (512MB)...${RESET}"
-        WRITE_SPEED=$(dd if=/dev/zero of=/tmp/skyware-bench bs=1M count=512             conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1)
+        WRITE_SPEED=$(dd if=/dev/zero of=/tmp/skyware-bench bs=1M count=512 \
+            conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1)
         rm -f /tmp/skyware-bench
         echo -e "${YELLOW}→ Sequential read test (512MB)...${RESET}"
         dd if=/dev/urandom of=/tmp/skyware-bench-src bs=1M count=512 2>/dev/null
@@ -820,7 +803,6 @@ print(f'{gb/elapsed:.1f} GB/s')
         rm -f /tmp/skyware-bench-src
         echo -e "Write:  ${WRITE_SPEED:-unavailable}"
         echo -e "Read:   ${READ_SPEED:-unavailable}"
-
         echo ""
         echo -e "${GREEN}── Summary ─────────────────────────${RESET}"
         echo -e "CPU Score:  $CPU_SCORE ops/5s"
@@ -841,7 +823,7 @@ print(f'{gb/elapsed:.1f} GB/s')
         echo -e "ware search <pkg>        - Search packages"
         echo -e "ware info <pkg>          - Package info"
         echo -e "ware list                - List installed packages"
-        echo -e "ware doctor              - Run diagnostics + optional AI repair"
+        echo -e "ware doctor              - Run diagnostics"
         echo -e "ware repair              - Fix broken pacman DB, packages, failed units"
         echo -e "ware backup <action>     - Snapshot management (create/list/restore/delete)"
         echo -e "ware benchmark           - CPU / RAM / disk speed test"
@@ -861,7 +843,7 @@ esac
 EOF
 sudo chmod +x /usr/local/bin/ware
 
-# ── Polkit rule for GUI privilege escalation ──
+# ── Polkit rule ──
 sudo mkdir -p /etc/polkit-1/rules.d
 sudo tee /etc/polkit-1/rules.d/10-skyware.rules > /dev/null << 'POLKITEOF'
 polkit.addRule(function(action, subject) {
@@ -872,25 +854,21 @@ polkit.addRule(function(action, subject) {
 POLKITEOF
 
 sudo tee /etc/sudoers.d/10-skyware > /dev/null << 'SUDOEOF'
-# SkywareOS — wheel users run all commands without password
-# Required for the Settings GUI (Electron has no tty for sudo prompts)
 %wheel ALL=(ALL) NOPASSWD: ALL
 SUDOEOF
 sudo chmod 440 /etc/sudoers.d/10-skyware
-# Validate the sudoers file before continuing
-sudo visudo -c -f /etc/sudoers.d/10-skyware && echo "✔ Passwordless sudo configured for wheel group" || echo "⚠ sudoers syntax error — removing" && sudo rm /etc/sudoers.d/10-skyware
+sudo visudo -c -f /etc/sudoers.d/10-skyware && echo "✔ Passwordless sudo configured for wheel group" || \
+    { echo "⚠ sudoers syntax error — removing"; sudo rm /etc/sudoers.d/10-skyware; }
 
 # ============================================================
 # SkywareOS Settings App (Electron + React)
 # ============================================================
 echo "== Installing SkywareOS Settings App =="
-
 sudo pacman -S --noconfirm --needed nodejs npm
 
 APP_DIR="/opt/skyware-settings"
 sudo mkdir -p "$APP_DIR/src"
 
-# package.json
 sudo tee "$APP_DIR/package.json" > /dev/null << 'EOF'
 {
   "name": "skyware-settings",
@@ -903,7 +881,6 @@ sudo tee "$APP_DIR/package.json" > /dev/null << 'EOF'
 }
 EOF
 
-# Electron main process
 sudo tee "$APP_DIR/main.js" > /dev/null << 'EOF'
 const { app, BrowserWindow, ipcMain } = require('electron');
 const { exec } = require('child_process');
@@ -931,11 +908,9 @@ function createWindow() {
       'height:100vh;margin:0;flex-direction:column;gap:16px;}',
       'code{background:#18181b;padding:10px 18px;border-radius:8px;',
       'color:#f87171;font-size:13px;border:1px solid #2a2a2f;}',
-      'p{color:#7a7a8a;font-size:14px;}',
       '</style></head><body>',
       '<div style="font-size:28px">⚠</div>',
       '<div style="font-size:17px;font-weight:600">Build not found</div>',
-      '<p>Run to rebuild:</p>',
       '<code>cd /opt/skyware-settings && npm install && npx vite build</code>',
       '</body></html>'
     ].join('')));
@@ -948,28 +923,21 @@ ipcMain.handle('run-cmd', async (event, cmd) => {
       ...process.env,
       PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:' + (process.env.PATH || ''),
     };
-
-    // Commands that are interactive or long-running need a real terminal
     const TERMINAL_CMDS = ['ware upgrade', 'ware switch', 'ware setup', 'ware snap', 'ware dm switch'];
     const needsTerminal = TERMINAL_CMDS.some(c => cmd.startsWith(c.replace(/^\/usr\/local\/bin\//, '')));
-
     if (needsTerminal) {
       const { spawn } = require('child_process');
-      // Write a temp script so there are zero quoting issues
       const tmpScript = '/tmp/skyware-run-' + Date.now() + '.sh';
       require('fs').writeFileSync(tmpScript,
         '#!/bin/bash\n' + cmd + '\necho\nread -p \'Press Enter to close...\'\n'
       );
       require('fs').chmodSync(tmpScript, 0o755);
-
-      // Try each terminal with its correct flag style
       const termArgs = [
         ['kitty', [tmpScript]],
         ['alacritty', ['-e', 'bash', tmpScript]],
         ['konsole', ['-e', 'bash', tmpScript]],
         ['xterm', ['-e', 'bash', tmpScript]],
       ];
-
       let launched = false;
       for (const [t, args] of termArgs) {
         const which = require('child_process').spawnSync('which', [t], { env });
@@ -981,7 +949,6 @@ ipcMain.handle('run-cmd', async (event, cmd) => {
         }
       }
       if (!launched) {
-        // No terminal — run in background and stream output normally
         const child = exec(
           `bash -c "${cmd.replace(/"/g, '\\"')}"`,
           { env, maxBuffer: 50 * 1024 * 1024, timeout: 300000 },
@@ -993,9 +960,6 @@ ipcMain.handle('run-cmd', async (event, cmd) => {
       }
       return;
     }
-
-    // Non-interactive commands — pipe empty stdin so prompts get EOF instead of hanging
-    // Increase maxBuffer to 50MB for commands with lots of output (flatpak update etc.)
     const child = exec(
       `bash -c "${cmd.replace(/"/g, '\\"')}"`,
       { env, maxBuffer: 50 * 1024 * 1024, timeout: 120000 },
@@ -1003,7 +967,6 @@ ipcMain.handle('run-cmd', async (event, cmd) => {
         resolve({ stdout: stdout || '', stderr: stderr || '', code: err ? err.code : 0 });
       }
     );
-    // Close stdin immediately so interactive prompts get EOF and don't hang
     if (child.stdin) child.stdin.end();
   });
 });
@@ -1016,7 +979,6 @@ app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 EOF
 
-# Preload
 sudo tee "$APP_DIR/preload.js" > /dev/null << 'EOF'
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('skyware', {
@@ -1027,14 +989,12 @@ contextBridge.exposeInMainWorld('skyware', {
 });
 EOF
 
-# Vite config
 sudo tee "$APP_DIR/vite.config.js" > /dev/null << 'EOF'
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 export default defineConfig({ plugins: [react()], base: './', build: { outDir: 'dist' } });
 EOF
 
-# HTML entry
 sudo tee "$APP_DIR/index.html" > /dev/null << 'EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -1051,7 +1011,6 @@ sudo tee "$APP_DIR/index.html" > /dev/null << 'EOF'
 </html>
 EOF
 
-# React entry
 sudo tee "$APP_DIR/src/main.jsx" > /dev/null << 'EOF'
 import React from 'react';
 import { createRoot } from 'react-dom/client';
@@ -1059,7 +1018,6 @@ import App from './App.jsx';
 createRoot(document.getElementById('root')).render(<App />);
 EOF
 
-# Main App component (written to a temp file first to avoid heredoc quoting issues)
 sudo tee "$APP_DIR/src/App.jsx" > /dev/null << 'APPEOF'
 import { useState, useEffect, useRef } from "react";
 
@@ -1080,7 +1038,6 @@ const SIDEBAR = [
   {id:"channel", label:"Channel",       icon:"◎"},
 ];
 
-// Prefix bare 'ware' commands with full path so they work regardless of PATH
 const api = (cmd) => {
   const resolved = cmd.replace(/^ware\b/, '/usr/local/bin/ware');
   return window.skyware?.runCmd(resolved) ?? Promise.resolve({stdout:`[sim] ${resolved}`,stderr:"",code:0});
@@ -1175,7 +1132,7 @@ function Btn({label,cmd,onClick,variant="default",icon}) {
 }
 
 function StatusSection({run}) {
-  const [s,setS]=useState({kernel:"…",uptime:"…",firewall:"…",disk:"…",memory:"…",desktop:"…",updates:"…"});
+  const [s,setS]=useState({kernel:"…",uptime:"…",firewall:"…",disk:"…",memory:"…",desktop:"…",updates:"…",session:"…"});
   useEffect(()=>{
     api("uname -r").then(r=>setS(p=>({...p,kernel:r.stdout.trim()||"—"})));
     api("uptime -p").then(r=>setS(p=>({...p,uptime:r.stdout.trim()||"—"})));
@@ -1184,6 +1141,7 @@ function StatusSection({run}) {
     api("free -h | awk '/Mem:/{print $3\"/\"$2}'").then(r=>setS(p=>({...p,memory:r.stdout.trim()||"—"})));
     api("echo ${XDG_CURRENT_DESKTOP:-Unknown}").then(r=>setS(p=>({...p,desktop:r.stdout.trim()||"Unknown"})));
     api("checkupdates 2>/dev/null | wc -l || echo 0").then(r=>setS(p=>({...p,updates:r.stdout.trim()||"0"})));
+    api("echo ${XDG_SESSION_TYPE:-unknown}").then(r=>setS(p=>({...p,session:r.stdout.trim()||"unknown"})));
   },[]);
   return (
     <div>
@@ -1196,14 +1154,15 @@ function StatusSection({run}) {
         <Card label="Memory"     value={s.memory}/>
         <Card label="Disk Usage" value={s.disk}/>
         <Card label="Desktop"    value={s.desktop}/>
+        <Card label="Session"    value={s.session} ab={s.session==="wayland"?C.green+"44":C.yellow+"33"}/>
         <Card label="Updates"    value={`${s.updates} available`} ab={parseInt(s.updates)>0?C.yellow+"44":undefined}/>
       </div>
       <div style={{display:"flex",gap:"10px",flexWrap:"wrap"}}>
-        <Btn label="Run Diagnostics" cmd="echo n | ware doctor"    onClick={run} icon="🩺"/>
-        <Btn label="Update System"   cmd="ware update"    onClick={run} icon="↑" variant="success"/>
-        <Btn label="Sync Mirrors"    cmd="ware sync"      onClick={run} icon="⟳"/>
-        <Btn label="Clean Cache"     cmd="ware clean"     onClick={run} icon="✦"/>
-        <Btn label="Autoremove"      cmd="ware autoremove"onClick={run} icon="✖" variant="danger"/>
+        <Btn label="Run Diagnostics" cmd="echo n | ware doctor" onClick={run} icon="🩺"/>
+        <Btn label="Update System"   cmd="ware update"          onClick={run} icon="↑" variant="success"/>
+        <Btn label="Sync Mirrors"    cmd="ware sync"            onClick={run} icon="⟳"/>
+        <Btn label="Clean Cache"     cmd="ware clean"           onClick={run} icon="✦"/>
+        <Btn label="Autoremove"      cmd="ware autoremove"      onClick={run} icon="✖" variant="danger"/>
       </div>
     </div>
   );
@@ -1255,10 +1214,10 @@ function PackagesSection({run}) {
         <Btn label="Install Package" cmd="" onClick={()=>{const v=document.getElementById("psi").value;if(v)run(`ware install ${v}`,`Install: ${v}`);}} icon="+" variant="success"/>
       </div>}
       {tab==="manage"&&<div style={{display:"flex",flexDirection:"column",gap:"10px"}}>
-        <Btn label="Update All" cmd="ware update" onClick={run} icon="↑" variant="success"/>
-        <Btn label="Autoremove Orphans" cmd="ware autoremove" onClick={run} icon="✖"/>
-        <Btn label="Clean Cache" cmd="ware clean" onClick={run} icon="✦"/>
-        <Btn label="List All Packages" cmd="ware list" onClick={run} icon="◈"/>
+        <Btn label="Update All"          cmd="ware update"      onClick={run} icon="↑" variant="success"/>
+        <Btn label="Autoremove Orphans"  cmd="ware autoremove"  onClick={run} icon="✖"/>
+        <Btn label="Clean Cache"         cmd="ware clean"       onClick={run} icon="✦"/>
+        <Btn label="List All Packages"   cmd="ware list"        onClick={run} icon="◈"/>
         <Btn label="Interactive Install" cmd="ware interactive" onClick={run} icon="⬡"/>
       </div>}
     </div>
@@ -1309,7 +1268,7 @@ function DisplaySection({run}) {
       <div style={{display:"flex",gap:"10px",flexWrap:"wrap"}}>
         <Btn label={`Switch to ${sel}`} cmd={`ware dm switch ${sel}`} onClick={run} icon="⬕" variant="success"/>
         <Btn label="Current Status" cmd="ware dm status" onClick={run} icon="◈"/>
-        <Btn label="List All DMs" cmd="ware dm list" onClick={run} icon="☰"/>
+        <Btn label="List All DMs"   cmd="ware dm list"   onClick={run} icon="☰"/>
       </div>
     </div>
   );
@@ -1350,15 +1309,15 @@ function SystemSection({run}) {
     <div>
       <Hdr title="System Tools" sub="Maintenance utilities and package manager extensions."/>
       <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:"10px"}}>
-        <Btn label="Run Doctor"         cmd="echo n | ware doctor"      onClick={run} icon="🩺"/>
-        <Btn label="AI Doctor"          cmd="ware-ai-doctor"   onClick={run} icon="🤖"/>
-        <Btn label="Sync Mirrors"       cmd="ware sync"        onClick={run} icon="⟳"/>
-        <Btn label="Clean Cache"        cmd="ware clean"       onClick={run} icon="✦"/>
-        <Btn label="Autoremove Orphans" cmd="ware autoremove"  onClick={run} icon="✖"/>
-        <Btn label="Enable Snap"        cmd="ware snap"        onClick={run} icon="+"/>
-        <Btn label="Remove Snap"        cmd="ware snap-remove" onClick={run} icon="✖" variant="danger"/>
-        <Btn label="Dual Boot (Limine)" cmd="ware dualboot"    onClick={run} icon="⬡"/>
-        <Btn label="Open Website"       cmd="ware git"         onClick={run} icon="◎"/>
+        <Btn label="Run Doctor"         cmd="echo n | ware doctor" onClick={run} icon="🩺"/>
+        <Btn label="AI Doctor"          cmd="ware-ai-doctor"       onClick={run} icon="🤖"/>
+        <Btn label="Sync Mirrors"       cmd="ware sync"            onClick={run} icon="⟳"/>
+        <Btn label="Clean Cache"        cmd="ware clean"           onClick={run} icon="✦"/>
+        <Btn label="Autoremove Orphans" cmd="ware autoremove"      onClick={run} icon="✖"/>
+        <Btn label="Enable Snap"        cmd="ware snap"            onClick={run} icon="+"/>
+        <Btn label="Remove Snap"        cmd="ware snap-remove"     onClick={run} icon="✖" variant="danger"/>
+        <Btn label="Dual Boot (Limine)" cmd="ware dualboot"        onClick={run} icon="⬡"/>
+        <Btn label="Open Website"       cmd="ware git"             onClick={run} icon="◎"/>
       </div>
     </div>
   );
@@ -1436,44 +1395,34 @@ export default function App() {
 }
 APPEOF
 
-# Build the React app — must run as the real user, not sudo
-# sudo npm causes builds to go into /root/.npm and dist/ either fails or has wrong perms
-echo "→ Installing npm dependencies and building the Settings app..."
-
-# Give the current user ownership so npm can write node_modules
+# Build React app as real user (FIX #10: avoid sudo npm permission issues)
+echo "→ Building Settings app..."
 sudo chown -R "$USER:$USER" "$APP_DIR"
-
 cd "$APP_DIR"
 npm install 2>&1 | tail -5
-npx vite build 2>&1 | tail -5
 
-# Verify the build actually produced output
+# FIX #10: install electron locally, not globally via sudo
+npm install --save-dev electron 2>&1 | tail -3
+
+npx vite build 2>&1 | tail -5
 if [ ! -f "$APP_DIR/dist/index.html" ]; then
     echo "✖ Vite build failed — retrying with verbose output:"
     npx vite build
     exit 1
 fi
+echo "✔ React app built"
 
-echo "✔ React app built → $APP_DIR/dist/index.html"
-
-# Lock down ownership now that build is done
 sudo chown -R root:root "$APP_DIR"
-sudo chmod -R 755 "$APP_DIR"
-# But make sure the actual user can still read it
 sudo chmod -R a+rX "$APP_DIR"
 
-# Install electron globally via npm (as root for system-wide install)
-sudo npm install -g electron 2>&1 | tail -3
-echo "✔ Electron installed"
-
-# Launcher wrapper script
+# FIX #10: launcher uses npx electron (local install), no sudo npm install -g needed
 sudo tee /usr/local/bin/skyware-settings > /dev/null << 'EOF'
 #!/bin/bash
-exec electron /opt/skyware-settings "$@"
+cd /opt/skyware-settings
+exec npx electron . "$@"
 EOF
 sudo chmod +x /usr/local/bin/skyware-settings
 
-# .desktop entry for app launchers (KDE, GNOME, etc.)
 sudo tee /usr/share/applications/skyware-settings.desktop > /dev/null << 'EOF'
 [Desktop Entry]
 Name=SkywareOS Settings
@@ -1488,106 +1437,30 @@ StartupWMClass=skyware-settings
 EOF
 
 echo "✔ SkywareOS Settings installed"
-echo "  → Launch from app menu: 'SkywareOS Settings'"
-echo "  → Or run: skyware-settings"
-echo "  → Or run: ware settings"
 
-# ── Pin to KDE taskbar + add desktop shortcut ──────────────────
-# KDE taskbar pinning: add to the panel's launcher list via plasma config
-# Desktop shortcut: copy .desktop to ~/Desktop
-
-# Desktop shortcut
 mkdir -p "$HOME/Desktop"
 cp /usr/share/applications/skyware-settings.desktop "$HOME/Desktop/skyware-settings.desktop"
 chmod +x "$HOME/Desktop/skyware-settings.desktop"
-echo "✔ SkywareOS Settings shortcut added to Desktop"
-
-# KDE taskbar pin — add to the Plasma panel's launcher (Task Manager pinned apps)
-# This writes into the plasmashell applets config under the Icons-only Task Manager
-# or regular Task Manager widget, which holds pinned launchers
-APPLETSRC="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
-
-if [ -f "$APPLETSRC" ]; then
-    # Find the task manager applet ID (Icons-only or regular)
-    TM_ID=$(grep -B5 "org.kde.plasma.icontasks\|org.kde.plasma.taskmanager"         "$APPLETSRC" 2>/dev/null | grep -oP '(?<=\[Applets\]\[)[0-9]+' | tail -1)
-
-    if [ -n "$TM_ID" ]; then
-        # Read existing launchers and append skyware-settings if not already there
-        EXISTING=$(kreadconfig6 --file "$APPLETSRC"             --group "Containments" --group "$(grep -B20 "Applets\]\[$TM_ID\]" "$APPLETSRC" | grep -oP '(?<=Containments\]\[)[0-9]+' | tail -1)"             --group "Applets" --group "$TM_ID"             --group "Configuration" --group "General"             --key "launchers" 2>/dev/null)
-
-        LAUNCHER="applications:skyware-settings.desktop"
-        if ! echo "$EXISTING" | grep -q "skyware-settings"; then
-            NEW_LAUNCHERS="${EXISTING:+$EXISTING,}$LAUNCHER"
-            kwriteconfig6 --file "$APPLETSRC"                 --group "Containments" --group "$(grep -B20 "Applets\]\[$TM_ID\]" "$APPLETSRC" | grep -oP '(?<=Containments\]\[)[0-9]+' | tail -1)"                 --group "Applets" --group "$TM_ID"                 --group "Configuration" --group "General"                 --key "launchers" "$NEW_LAUNCHERS" 2>/dev/null &&                 echo "✔ SkywareOS Settings pinned to taskbar (applet $TM_ID)"
-        else
-            echo "→ SkywareOS Settings already pinned to taskbar"
-        fi
-    fi
-fi
-
-# Autostart script to pin on first login if config didn't exist yet
-mkdir -p "$HOME/.config/autostart-scripts"
-cat > "$HOME/.config/autostart-scripts/skyware-pin-taskbar.sh" << 'PINEOF'
-#!/bin/bash
-FLAG="$HOME/.config/skyware/taskbar-pinned"
-[ -f "$FLAG" ] && exit 0
-sleep 6
-
-APPLETSRC="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
-[ -f "$APPLETSRC" ] || exit 0
-
-TM_ID=$(grep -B5 "org.kde.plasma.icontasks\|org.kde.plasma.taskmanager"     "$APPLETSRC" 2>/dev/null | grep -oP '(?<=\[Applets\]\[)[0-9]+' | tail -1)
-[ -z "$TM_ID" ] && exit 0
-
-CONT_ID=$(grep -B20 "\[Applets\]\[$TM_ID\]" "$APPLETSRC" | grep -oP '(?<=\[Containments\]\[)[0-9]+' | tail -1)
-[ -z "$CONT_ID" ] && exit 0
-
-EXISTING=$(kreadconfig6 --file "$APPLETSRC"     --group "Containments" --group "$CONT_ID"     --group "Applets" --group "$TM_ID"     --group "Configuration" --group "General"     --key "launchers" 2>/dev/null)
-
-LAUNCHER="applications:skyware-settings.desktop"
-if ! echo "$EXISTING" | grep -q "skyware-settings"; then
-    NEW="${EXISTING:+$EXISTING,}$LAUNCHER"
-    kwriteconfig6 --file "$APPLETSRC"         --group "Containments" --group "$CONT_ID"         --group "Applets" --group "$TM_ID"         --group "Configuration" --group "General"         --key "launchers" "$NEW" 2>/dev/null
-    qdbus6 org.kde.plasmashell /PlasmaShell         org.kde.PlasmaShell.evaluateScript         "var a=desktops()[0]; print(a);" 2>/dev/null || true
-fi
-
-mkdir -p "$HOME/.config/skyware"
-touch "$FLAG"
-PINEOF
-chmod +x "$HOME/.config/autostart-scripts/skyware-pin-taskbar.sh"
 
 # ============================================================
 # AppArmor (Mandatory Access Control)
+# FIX #6: apparmor-profiles doesn't exist — just apparmor
 # ============================================================
 echo "== Setting up AppArmor =="
-
 sudo pacman -S --noconfirm --needed apparmor
-
-# Enable the AppArmor systemd service
 sudo systemctl enable apparmor
 
-# Add apparmor to kernel cmdline so it activates at boot
-if [ -n "$LIMINE_CONF" ]; then
-    if grep -qi "^[[:space:]]*cmdline" "$LIMINE_CONF"; then
-        sudo sed -i -E '/^[[:space:]]*cmdline/{ /apparmor=1/! s/$/ apparmor=1 security=apparmor/ }' "$LIMINE_CONF"
-        echo "✔ AppArmor kernel params added to limine.conf"
-    fi
-fi
-
-# Install extra AppArmor profiles
-sudo pacman -S --noconfirm --needed apparmor-profiles 2>/dev/null || true
+# Kernel params already added to limine.conf above (in the Limine section)
+# so we skip the duplicate sed here
 
 echo "✔ AppArmor enabled (enforcing on next boot)"
 
 # ============================================================
-# Automatic Security Updates (pacman hook)
+# Automatic Security Updates
+# FIX #7: use --ask 4 so unattended pacman doesn't stall on prompts
 # ============================================================
 echo "== Setting up automatic security updates =="
-
 sudo pacman -S --noconfirm --needed archlinux-keyring
-
-# Install systemd timer to run security updates weekly
-sudo mkdir -p /etc/systemd/system
 
 sudo tee /etc/systemd/system/skyware-security-update.service > /dev/null << 'EOF'
 [Unit]
@@ -1597,7 +1470,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/pacman -Syu --noconfirm --needed
+# --ask 4 auto-answers "yes" to all pacman prompts (prevents stalling)
+ExecStart=/usr/bin/pacman -Syu --noconfirm --noprogressbar --ask 4
 ExecStartPost=/usr/bin/flatpak update -y
 StandardOutput=journal
 StandardError=journal
@@ -1617,9 +1491,8 @@ WantedBy=timers.target
 EOF
 
 sudo systemctl enable skyware-security-update.timer
-echo "✔ Weekly auto-update timer enabled (skyware-security-update.timer)"
+echo "✔ Weekly auto-update timer enabled"
 
-# pacman hook to re-sign keyring after updates
 sudo mkdir -p /etc/pacman.d/hooks
 sudo tee /etc/pacman.d/hooks/keyring-refresh.hook > /dev/null << 'EOF'
 [Trigger]
@@ -1632,21 +1505,15 @@ Description = Refreshing pacman keyring after upgrade...
 When = PostTransaction
 Exec = /usr/bin/pacman-key --refresh-keys
 EOF
-
 echo "✔ Pacman keyring auto-refresh hook installed"
 
 # ============================================================
 # SSH Hardening
 # ============================================================
 echo "== Hardening SSH =="
-
 sudo pacman -S --noconfirm --needed openssh
-
-# Backup original sshd config
 sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak 2>/dev/null || true
-
 sudo tee /etc/ssh/sshd_config.d/99-skywareos-hardening.conf > /dev/null << 'EOF'
-# SkywareOS SSH Hardening
 PermitRootLogin no
 PasswordAuthentication yes
 PermitEmptyPasswords no
@@ -1659,38 +1526,25 @@ Protocol 2
 ClientAliveInterval 300
 ClientAliveCountMax 2
 EOF
-
 sudo systemctl enable sshd
-echo "✔ SSH hardened (root login disabled, max 3 auth attempts)"
+echo "✔ SSH hardened"
 
 # ============================================================
-# USBGuard (USB Attack Protection)
+# USBGuard
 # ============================================================
 echo "== Setting up USBGuard =="
-
 sudo pacman -S --noconfirm --needed usbguard
-
-# Generate an initial policy from currently connected devices
-# This whitelists everything plugged in right now, blocks new unknown devices
 sudo usbguard generate-policy | sudo tee /etc/usbguard/rules.conf >/dev/null
-
 sudo systemctl enable usbguard
 sudo systemctl start usbguard
-
-echo "✔ USBGuard enabled — current USB devices whitelisted"
-echo "  → New unknown USB devices will be blocked by default"
-echo "  → To allow a new device: sudo usbguard allow-device <id>"
+echo "✔ USBGuard enabled"
 
 # ============================================================
 # Bluetooth
 # ============================================================
 echo "== Setting up Bluetooth =="
-
 sudo pacman -S --noconfirm --needed bluez bluez-utils blueman
-
 sudo systemctl enable bluetooth
-
-# Enable auto-power-on for bluetooth adapter at boot
 sudo mkdir -p /etc/bluetooth
 if [ ! -f /etc/bluetooth/main.conf ]; then
     sudo tee /etc/bluetooth/main.conf > /dev/null << 'EOF'
@@ -1698,62 +1552,46 @@ if [ ! -f /etc/bluetooth/main.conf ]; then
 AutoEnable=true
 EOF
 else
-    # Patch existing config
     if ! grep -q "AutoEnable" /etc/bluetooth/main.conf; then
         echo -e "\n[Policy]\nAutoEnable=true" | sudo tee -a /etc/bluetooth/main.conf >/dev/null
     else
         sudo sed -i 's/AutoEnable=false/AutoEnable=true/' /etc/bluetooth/main.conf
     fi
 fi
-
-echo "✔ Bluetooth enabled (bluez + blueman GUI)"
+echo "✔ Bluetooth enabled"
 
 # ============================================================
-# Printing (CUPS)
+# Printing (CUPS) — socket-activated, no boot delay
 # ============================================================
 echo "== Setting up printing support =="
-
 sudo pacman -S --noconfirm --needed cups cups-pdf system-config-printer \
     gutenprint foomatic-db foomatic-db-engine
-
-# Use socket activation instead of always-on — prevents boot hang
-# cups.socket starts CUPS on-demand (first print job or http://localhost:631)
-# cups.service starts immediately when triggered, not at boot
 sudo systemctl disable cups.service 2>/dev/null || true
 sudo systemctl enable cups.socket
-sudo systemctl enable cups.service  # enabled but not started at boot
+sudo systemctl enable cups.service
 sudo systemctl stop cups.service 2>/dev/null || true
-
-# cups-browsed can hang waiting for network — disable it, not needed for local printing
 sudo systemctl disable cups-browsed.service 2>/dev/null || true
 sudo systemctl stop cups-browsed.service 2>/dev/null || true
-
-# Avahi for network printer discovery — use socket activation here too
 sudo pacman -S --noconfirm --needed nss-mdns avahi
 sudo systemctl disable avahi-daemon.service 2>/dev/null || true
-sudo systemctl enable avahi-daemon.socket   # starts on-demand, not at boot
+sudo systemctl enable avahi-daemon.socket
 sudo systemctl enable avahi-daemon.service
-
-# Patch /etc/nsswitch.conf to enable mDNS resolution
 if ! grep -q "mdns_minimal" /etc/nsswitch.conf; then
     sudo sed -i 's/^hosts:.*/hosts: mymachines mdns_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] files myhostname dns/' \
         /etc/nsswitch.conf
 fi
-
-echo "✔ CUPS printing enabled (socket-activated — no boot delay)"
-echo "  → Opens on first use or at http://localhost:631"
-echo "✔ Network printer discovery (Avahi, socket-activated)"
+echo "✔ CUPS printing enabled (socket-activated)"
 
 # ============================================================
-# Touchpad Gestures (libinput-gestures)
+# Touchpad Gestures — Wayland-native via libinput-gestures
 # ============================================================
 echo "== Setting up touchpad gestures =="
+sudo pacman -S --noconfirm --needed libinput
+# wmctrl/xdotool are X11 tools; on Wayland use ydotool or wtype instead
+sudo pacman -S --noconfirm --needed ydotool 2>/dev/null || true
 
-sudo pacman -S --noconfirm --needed libinput wmctrl xdotool
-
-# libinput-gestures is AUR — use paru if available, else build manually
 if command -v paru &>/dev/null; then
-    paru -S --noconfirm libinput-gestures
+    paru -S --noconfirm libinput-gestures 2>/dev/null || true
 else
     git clone https://github.com/bulletmark/libinput-gestures.git /tmp/libinput-gestures
     cd /tmp/libinput-gestures
@@ -1762,32 +1600,27 @@ else
     rm -rf /tmp/libinput-gestures
 fi
 
-# Add current user to the input group (required for reading gesture events)
 sudo gpasswd -a "$USER" input
 
-# Default gesture config: 3-finger swipe for workspace switching,
-# pinch for zoom — sensible defaults that work on KDE and Hyprland
 mkdir -p "$HOME/.config"
 cat > "$HOME/.config/libinput-gestures.conf" << 'EOF'
-# SkywareOS default touch gestures
+# SkywareOS Wayland gesture config
+# Uses KWin D-Bus calls for workspace switching (works on Wayland)
 
-# 3-finger swipe left/right  → switch workspaces
-gesture swipe left  3  xdotool key super+Right
-gesture swipe right 3  xdotool key super+Left
+# 3-finger swipe left/right → switch workspaces
+gesture swipe left  3  qdbus6 org.kde.KWin /KWin nextDesktop
+gesture swipe right 3  qdbus6 org.kde.KWin /KWin previousDesktop
 
-# 3-finger swipe up/down  → show desktop overview / hide
-gesture swipe up    3  xdotool key super+s
-gesture swipe down  3  xdotool key super+s
+# 3-finger swipe up → overview
+gesture swipe up    3  qdbus6 org.kde.KWin /KWin toggleOverview
 
-# 4-finger swipe up  → show all windows
-gesture swipe up    4  xdotool key super+w
+# 3-finger swipe down → show desktop
+gesture swipe down  3  qdbus6 org.kde.KWin /KWin showDesktop
 
-# Pinch in/out  → zoom
-gesture pinch in    2  xdotool key super+minus
-gesture pinch out   2  xdotool key super+equal
+# 4-finger swipe up → window overview
+gesture swipe up    4  qdbus6 org.kde.KWin /KWin showAllWindowsFromCurrentApplication
 EOF
 
-# Autostart libinput-gestures on login
 mkdir -p "$HOME/.config/autostart"
 cat > "$HOME/.config/autostart/libinput-gestures.desktop" << 'EOF'
 [Desktop Entry]
@@ -1798,16 +1631,13 @@ X-GNOME-Autostart-enabled=true
 EOF
 
 libinput-gestures-setup autostart start 2>/dev/null || true
-echo "✔ Touchpad gestures configured (3-finger swipe, pinch zoom)"
+echo "✔ Touchpad gestures configured (Wayland/KWin D-Bus)"
 
 # ============================================================
-# Timezone + Locale Auto-Detection
+# Timezone + Locale
 # ============================================================
 echo "== Configuring timezone and locale =="
-
-# Auto-detect timezone via IP geolocation (no account needed)
 DETECTED_TZ=$(curl -s --max-time 5 "https://ipapi.co/timezone" 2>/dev/null || echo "")
-
 if [ -n "$DETECTED_TZ" ] && timedatectl list-timezones | grep -qx "$DETECTED_TZ"; then
     sudo timedatectl set-timezone "$DETECTED_TZ"
     echo "✔ Timezone auto-set to: $DETECTED_TZ"
@@ -1815,12 +1645,8 @@ else
     echo "⚠ Could not auto-detect timezone — falling back to UTC"
     sudo timedatectl set-timezone UTC
 fi
-
-# Enable NTP sync
 sudo timedatectl set-ntp true
 echo "✔ NTP time sync enabled"
-
-# Set locale to en_US.UTF-8 (uncomment if not already set)
 if ! grep -q "^en_US.UTF-8 UTF-8" /etc/locale.gen; then
     echo "en_US.UTF-8 UTF-8" | sudo tee -a /etc/locale.gen >/dev/null
 fi
@@ -1828,99 +1654,65 @@ sudo locale-gen
 if [ ! -f /etc/locale.conf ] || ! grep -q "LANG=" /etc/locale.conf; then
     echo "LANG=en_US.UTF-8" | sudo tee /etc/locale.conf >/dev/null
 fi
-
 echo "✔ Locale set to en_US.UTF-8"
 
 # ============================================================
-# Docker / Podman
+# Docker + Podman
+# FIX #4: add "ip6tables": false to daemon.json to prevent crash
+#          on systems without IPv6
 # ============================================================
 echo "== Setting up Docker and Podman =="
-
 sudo pacman -S --noconfirm --needed docker podman docker-compose podman-compose \
     docker-buildx
-
 sudo systemctl enable docker
-
-# Add current user to docker group so sudo isn't needed
 sudo gpasswd -a "$USER" docker
-
-# Configure Docker daemon — use systemd cgroups, enable live restore
 sudo mkdir -p /etc/docker
 sudo tee /etc/docker/daemon.json > /dev/null << 'EOF'
 {
   "exec-opts": ["native.cgroupdriver=systemd"],
   "log-driver": "journald",
   "live-restore": true,
-  "userland-proxy": false
+  "userland-proxy": false,
+  "ip6tables": false
 }
 EOF
-
-# Podman rootless setup for the current user
 sudo pacman -S --noconfirm --needed fuse-overlayfs slirp4netns
-echo "✔ Docker + Podman installed"
-echo "  → Log out and back in for docker group to take effect"
+echo "✔ Docker + Podman installed (ip6tables workaround applied)"
 
 # ============================================================
-# ProtonVPN / Mullvad VPN Integration
+# VPN Support
 # ============================================================
 echo "== Setting up VPN support =="
-
-# Install NetworkManager VPN plugins (works with both ProtonVPN and Mullvad)
-# WireGuard support is built into NetworkManager directly on Arch —
-# networkmanager-wireguard does not exist as a separate package
 sudo pacman -S --noconfirm --needed \
     networkmanager-openvpn \
     wireguard-tools \
     openvpn \
     networkmanager \
     network-manager-applet
-
-# Disable wait-online — this service waits for full network before boot continues,
-# causing 60-75s delays on desktop systems. NetworkManager handles connections fine
-# in the background without holding up SDDM and the rest of the boot chain.
+# Disable NetworkManager-wait-online to avoid 60s+ boot delay
 sudo systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
-
-# ProtonVPN CLI (AUR)
 if command -v paru &>/dev/null; then
     paru -S --noconfirm protonvpn-cli 2>/dev/null || \
         echo "⚠ protonvpn-cli not available — install manually from AUR"
 fi
-
-# Mullvad (official deb/rpm not on AUR, but WireGuard config import works)
-echo ""
-echo "  VPN setup:"
-echo "  → ProtonVPN: run 'protonvpn-cli login' after install"
-echo "  → Mullvad:   download WireGuard config from mullvad.net,"
-echo "               then import via: nmcli connection import type wireguard file <config.conf>"
-
-echo "✔ VPN support installed (OpenVPN + WireGuard + ProtonVPN CLI)"
+echo "✔ VPN support installed (OpenVPN + WireGuard)"
 
 # ============================================================
-# Dotfiles Backup (auto git)
+# Dotfiles Auto-backup
 # ============================================================
 echo "== Setting up automatic dotfiles backup =="
-
 DOTFILES_DIR="$HOME/.dotfiles"
 mkdir -p "$DOTFILES_DIR"
-
-# Init a bare git repo for dotfiles tracking (the bare repo method)
 if [ ! -d "$DOTFILES_DIR/.git" ] && [ ! -f "$DOTFILES_DIR/HEAD" ]; then
     git init --bare "$DOTFILES_DIR" 2>/dev/null || git init "$DOTFILES_DIR"
 fi
-
-# Wrapper alias that uses the dotfiles repo
 DOTFILES_CMD="git --git-dir=$DOTFILES_DIR --work-tree=$HOME"
-
-# Add to zshrc if not already there
 if ! grep -q "alias dotfiles=" "$HOME/.zshrc" 2>/dev/null; then
     cat >> "$HOME/.zshrc" << 'EOF'
 
-# Dotfiles management
 alias dotfiles='git --git-dir=$HOME/.dotfiles --work-tree=$HOME'
 EOF
 fi
-
-# Track key config files
 $DOTFILES_CMD config status.showUntrackedFiles no 2>/dev/null || true
 for f in \
     "$HOME/.zshrc" \
@@ -1930,10 +1722,8 @@ for f in \
     "$HOME/.config/libinput-gestures.conf"; do
     [ -f "$f" ] && $DOTFILES_CMD add "$f" 2>/dev/null || true
 done
-
 $DOTFILES_CMD commit -m "SkywareOS initial dotfiles snapshot" 2>/dev/null || true
 
-# Install systemd timer to auto-commit dotfile changes daily
 mkdir -p "$HOME/.config/systemd/user"
 tee "$HOME/.config/systemd/user/dotfiles-backup.service" > /dev/null << SVCEOF
 [Unit]
@@ -1943,7 +1733,6 @@ Description=SkywareOS Dotfiles Auto-Backup
 Type=oneshot
 ExecStart=/bin/bash -c 'git --git-dir=%h/.dotfiles --work-tree=%h add -u && git --git-dir=%h/.dotfiles --work-tree=%h commit -m "auto: $(date +%%Y-%%m-%%d)" 2>/dev/null || true'
 SVCEOF
-
 tee "$HOME/.config/systemd/user/dotfiles-backup.timer" > /dev/null << 'EOF'
 [Unit]
 Description=Daily Dotfiles Backup
@@ -1955,87 +1744,51 @@ Persistent=true
 [Install]
 WantedBy=default.target
 EOF
-
 systemctl --user enable dotfiles-backup.timer 2>/dev/null || true
 echo "✔ Dotfiles repo initialized at ~/.dotfiles"
-echo "  → Use 'dotfiles add <file>' to track new files"
-echo "  → Use 'dotfiles push' to sync to a remote (add with: dotfiles remote add origin <url>)"
 
 # ============================================================
-# TLP Battery Health Auto-Tune
+# TLP Battery Health
 # ============================================================
 echo "== Setting up TLP battery health daemon =="
-
 sudo pacman -S --noconfirm --needed tlp tlp-rdw ethtool smartmontools
-
 sudo systemctl enable tlp
 sudo systemctl enable NetworkManager-dispatcher
-
-# Disable conflicting power services
 sudo systemctl disable power-profiles-daemon 2>/dev/null || true
 sudo systemctl mask systemd-rfkill.service systemd-rfkill.socket 2>/dev/null || true
-
-# Write a tuned TLP config optimized for battery health
 sudo tee /etc/tlp.conf > /dev/null << 'EOF'
-# SkywareOS TLP Battery Config
-
 TLP_ENABLE=1
 TLP_DEFAULT_MODE=AC
-
-# CPU scaling — balanced by default
 CPU_SCALING_GOVERNOR_ON_AC=schedutil
 CPU_SCALING_GOVERNOR_ON_BAT=powersave
 CPU_ENERGY_PERF_POLICY_ON_AC=balance_performance
 CPU_ENERGY_PERF_POLICY_ON_BAT=power
-
-# Charge thresholds — keeps battery between 20-80% for longevity
-# (supported on ThinkPads and some ASUS/Dell laptops)
 START_CHARGE_THRESH_BAT0=20
 STOP_CHARGE_THRESH_BAT0=80
-
-# PCIe ASPM — power saving on battery
 PCIE_ASPM_ON_AC=default
 PCIE_ASPM_ON_BAT=powersupersave
-
-# USB autosuspend
 USB_AUTOSUSPEND=1
 USB_EXCLUDE_AUDIO=1
 USB_EXCLUDE_BTUSB=1
-
-# Disk APM — balanced
 DISK_APM_LEVEL_ON_AC="254 254"
 DISK_APM_LEVEL_ON_BAT="128 128"
-
-# WiFi power save on battery
 WIFI_PWR_ON_AC=off
 WIFI_PWR_ON_BAT=on
-
-# Disable NMI watchdog on battery (saves ~0.5W)
 NMI_WATCHDOG=0
-
-# Runtime power management
 RUNTIME_PM_ON_AC=on
 RUNTIME_PM_ON_BAT=auto
 EOF
-
-echo "✔ TLP configured with battery health thresholds (charge 20–80%)"
-echo "  → Run 'tlp-stat' to see current power stats"
-echo "  → Charge thresholds apply to supported laptops (ThinkPad, ASUS, some Dell)"
-
-
+echo "✔ TLP configured (charge thresholds 20–80%)"
 
 # ============================================================
 # KDE Global Theme + Color Scheme
+# FIX #9: guard fully behind KDE install check
 # ============================================================
 echo "== Applying SkywareOS KDE theme =="
-
-if pacman -Q plasma-desktop &>/dev/null; then
-    # Install Lightly theme (clean, modern KDE theme from AUR)
+if pacman -Q plasma-desktop &>/dev/null && command -v kwriteconfig6 &>/dev/null; then
     if command -v paru &>/dev/null; then
         paru -S --noconfirm lightly-git 2>/dev/null || true
     fi
-
-    # Apply color scheme — write a custom Skyware dark gray palette
     mkdir -p "$HOME/.local/share/color-schemes"
     cat > "$HOME/.local/share/color-schemes/SkywareOS.colors" << 'EOF'
 [ColorEffects:Disabled]
@@ -2072,62 +1825,6 @@ ForegroundNormal=226,226,236
 ForegroundPositive=74,222,128
 ForegroundVisited=167,139,250
 
-[Colors:Complementary]
-BackgroundAlternate=14,14,16
-BackgroundNormal=17,17,19
-DecorationFocus=160,160,176
-DecorationHover=160,160,176
-ForegroundActive=200,200,220
-ForegroundInactive=74,74,88
-ForegroundLink=96,165,250
-ForegroundNegative=248,113,113
-ForegroundNeutral=250,204,21
-ForegroundNormal=226,226,236
-ForegroundPositive=74,222,128
-ForegroundVisited=167,139,250
-
-[Colors:Header]
-BackgroundAlternate=12,12,14
-BackgroundNormal=14,14,16
-DecorationFocus=160,160,176
-DecorationHover=160,160,176
-ForegroundActive=200,200,220
-ForegroundInactive=74,74,88
-ForegroundLink=96,165,250
-ForegroundNegative=248,113,113
-ForegroundNeutral=250,204,21
-ForegroundNormal=226,226,236
-ForegroundPositive=74,222,128
-ForegroundVisited=167,139,250
-
-[Colors:Selection]
-BackgroundAlternate=31,31,35
-BackgroundNormal=42,42,50
-DecorationFocus=160,160,176
-DecorationHover=160,160,176
-ForegroundActive=200,200,220
-ForegroundInactive=122,122,138
-ForegroundLink=96,165,250
-ForegroundNegative=248,113,113
-ForegroundNeutral=250,204,21
-ForegroundNormal=226,226,236
-ForegroundPositive=74,222,128
-ForegroundVisited=167,139,250
-
-[Colors:Tooltip]
-BackgroundAlternate=17,17,19
-BackgroundNormal=24,24,27
-DecorationFocus=160,160,176
-DecorationHover=160,160,176
-ForegroundActive=200,200,220
-ForegroundInactive=74,74,88
-ForegroundLink=96,165,250
-ForegroundNegative=248,113,113
-ForegroundNeutral=250,204,21
-ForegroundNormal=226,226,236
-ForegroundPositive=74,222,128
-ForegroundVisited=167,139,250
-
 [Colors:View]
 BackgroundAlternate=17,17,19
 BackgroundNormal=14,14,16
@@ -2156,6 +1853,30 @@ ForegroundNormal=226,226,236
 ForegroundPositive=74,222,128
 ForegroundVisited=167,139,250
 
+[Colors:Complementary]
+BackgroundAlternate=14,14,16
+BackgroundNormal=17,17,19
+DecorationFocus=160,160,176
+DecorationHover=160,160,176
+ForegroundNormal=226,226,236
+ForegroundInactive=74,74,88
+
+[Colors:Header]
+BackgroundAlternate=12,12,14
+BackgroundNormal=14,14,16
+ForegroundNormal=226,226,236
+ForegroundInactive=74,74,88
+
+[Colors:Selection]
+BackgroundAlternate=31,31,35
+BackgroundNormal=42,42,50
+ForegroundNormal=226,226,236
+
+[Colors:Tooltip]
+BackgroundAlternate=17,17,19
+BackgroundNormal=24,24,27
+ForegroundNormal=226,226,236
+
 [General]
 ColorScheme=SkywareOS
 Name=SkywareOS
@@ -2173,33 +1894,27 @@ inactiveBlend=14,14,16
 inactiveForeground=74,74,88
 EOF
 
-    # Apply the color scheme and window decoration via kconfig
     kwriteconfig6 --file kdeglobals --group General \
         --key ColorScheme "SkywareOS" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group org.kde.kdecoration2 \
         --key theme "org.kde.breeze" 2>/dev/null || true
     kwriteconfig6 --file kdeglobals --group KDE \
         --key widgetStyle "Breeze" 2>/dev/null || true
-
-    # Set Plasma panel to dark
     kwriteconfig6 --file plasmarc --group Theme \
         --key name "breeze-dark" 2>/dev/null || true
-
     echo "✔ SkywareOS KDE color scheme applied"
 else
-    echo "→ KDE not installed, skipping theme application"
+    echo "→ KDE not installed, skipping theme"
 fi
 
 # ============================================================
-# Custom Cursor Theme (Bibata Modern Classic — clean, modern)
+# Cursor Theme (Bibata Modern Classic)
 # ============================================================
 echo "== Installing cursor theme =="
-
 if command -v paru &>/dev/null; then
     paru -S --noconfirm bibata-cursor-theme 2>/dev/null || \
         echo "⚠ bibata-cursor-theme not found in AUR, skipping"
 else
-    # Fallback: download directly from GitHub releases
     BIBATA_URL="https://github.com/ful1e5/Bibata_Cursor/releases/latest/download/Bibata-Modern-Classic.tar.xz"
     curl -L "$BIBATA_URL" -o /tmp/bibata.tar.xz 2>/dev/null && \
         sudo tar -xf /tmp/bibata.tar.xz -C /usr/share/icons/ && \
@@ -2208,50 +1923,42 @@ else
         echo "⚠ Could not download cursor theme"
 fi
 
-# Apply system-wide
 sudo mkdir -p /usr/share/icons/default
 sudo tee /usr/share/icons/default/index.theme > /dev/null << 'EOF'
 [Icon Theme]
 Inherits=Bibata-Modern-Classic
 EOF
-
-# Apply per-user
 mkdir -p "$HOME/.icons/default"
 cat > "$HOME/.icons/default/index.theme" << 'EOF'
 [Icon Theme]
 Inherits=Bibata-Modern-Classic
 EOF
-
-# Apply in KDE
-kwriteconfig6 --file kcminputrc --group Mouse \
-    --key cursorTheme "Bibata-Modern-Classic" 2>/dev/null || true
-kwriteconfig6 --file kcminputrc --group Mouse \
-    --key cursorSize "24" 2>/dev/null || true
-
+if pacman -Q plasma-desktop &>/dev/null && command -v kwriteconfig6 &>/dev/null; then
+    kwriteconfig6 --file kcminputrc --group Mouse \
+        --key cursorTheme "Bibata-Modern-Classic" 2>/dev/null || true
+    kwriteconfig6 --file kcminputrc --group Mouse \
+        --key cursorSize "24" 2>/dev/null || true
+fi
 echo "✔ Cursor theme set to Bibata Modern Classic"
 
 # ============================================================
-# Custom MOTD — Skyware ASCII + live stats on SSH/TTY login
+# MOTD — FIX #8: checkupdates is now available (pacman-contrib installed above)
 # ============================================================
 echo "== Setting up SkywareOS MOTD =="
-
 sudo pacman -S --noconfirm --needed figlet lolcat 2>/dev/null || true
 
 sudo tee /etc/profile.d/skyware-motd.sh > /dev/null << 'MOTDEOF'
 #!/bin/bash
-# Only show on interactive login shells, not in scripts
 [[ $- != *i* ]] && return
 [[ -n "$MOTD_SHOWN" ]] && return
 export MOTD_SHOWN=1
 
-# Colors
 GRAY="\e[38;5;245m"
 LGRAY="\e[38;5;250m"
 WHITE="\e[97m"
 GREEN="\e[92m"
 YELLOW="\e[93m"
 RED="\e[91m"
-BLUE="\e[94m"
 RESET="\e[0m"
 BOLD="\e[1m"
 
@@ -2261,50 +1968,37 @@ echo -e "${GRAY}    %@@@@@@@@@@=      @@@@@@@@@@    ${RESET}    ${BOLD}${WHITE}S
 echo -e "${GRAY}   @@@@     @@@@@      -     #@@@   ${RESET}    ${LGRAY}────────────────────────────${RESET}"
 echo -e "${GRAY}  :@@*        @@@@             @@@  ${RESET}    ${GRAY}Kernel  ${RESET}$(uname -r)"
 echo -e "${GRAY}  @@@          @@@@            @@@  ${RESET}    ${GRAY}Uptime  ${RESET}$(uptime -p | sed 's/up //')"
-echo -e "${GRAY}  @@@           @@@@           %@@  ${RESET}    ${GRAY}Shell   ${RESET}zsh $(zsh --version | cut -d' ' -f2)"
+echo -e "${GRAY}  @@@           @@@@           %@@  ${RESET}    ${GRAY}Shell   ${RESET}zsh $(zsh --version 2>/dev/null | cut -d' ' -f2)"
 echo -e "${GRAY}  @@@            @@@@          @@@  ${RESET}    ${GRAY}Pkgs    ${RESET}$(pacman -Q 2>/dev/null | wc -l) (pacman)"
 echo -e "${GRAY}  :@@@            @@@@:        @@@  ${RESET}    ${GRAY}Memory  ${RESET}$(free -h | awk '/Mem:/{print $3"/"$2}')"
 echo -e "${GRAY}   @@@@     =      @@@@@     %@@@   ${RESET}    ${GRAY}Disk    ${RESET}$(df -h / | awk 'NR==2{print $3"/"$2" ("$5")"}')"
-echo -e "${GRAY}    @@@@@@@@@@       @@@@@@@@@@@    ${RESET}"
+echo -e "${GRAY}    @@@@@@@@@@       @@@@@@@@@@@    ${RESET}    ${GRAY}Session ${RESET}${XDG_SESSION_TYPE:-unknown}"
 echo -e "${GRAY}      @@@@@@+          %@@@@@@      ${RESET}"
 echo ""
 
-# Update notification
 UPDATES=$(checkupdates 2>/dev/null | wc -l)
 if [ "$UPDATES" -gt 0 ]; then
-    echo -e "  ${YELLOW}⚠${RESET}  ${YELLOW}${UPDATES} update(s) available${RESET} — run ${GRAY}ware update${RESET} to install"
+    echo -e "  ${YELLOW}⚠${RESET}  ${YELLOW}${UPDATES} update(s) available${RESET} — run ${GRAY}ware update${RESET}"
     echo ""
 fi
-
-# Firewall status
 if ! systemctl is-active ufw >/dev/null 2>&1; then
     echo -e "  ${RED}✖${RESET}  ${RED}Firewall is not running${RESET} — run ${GRAY}sudo ufw enable${RESET}"
     echo ""
 fi
 MOTDEOF
-
 sudo chmod +x /etc/profile.d/skyware-motd.sh
-
-# Disable the default Arch MOTD
 sudo rm -f /etc/motd
-echo "✔ SkywareOS MOTD installed (shows on login)"
+echo "✔ MOTD installed"
 
 # ============================================================
 # Tmux — Skyware theme
 # ============================================================
 echo "== Setting up tmux =="
-
 sudo pacman -S --noconfirm --needed tmux
-
 cat > "$HOME/.tmux.conf" << 'EOF'
-# ── SkywareOS tmux config ─────────────────────────────────────
-
-# Remap prefix to Ctrl+Space
 unbind C-b
 set -g prefix C-Space
 bind C-Space send-prefix
-
-# Quality of life
 set -g mouse on
 set -g history-limit 50000
 set -g base-index 1
@@ -2314,60 +2008,39 @@ set -sg escape-time 0
 set -g focus-events on
 set -g default-terminal "tmux-256color"
 set -ag terminal-overrides ",xterm-256color:RGB"
-
-# ── Status bar ────────────────────────────────────────────────
 set -g status on
 set -g status-position bottom
 set -g status-interval 5
 set -g status-style "bg=#0e0e10,fg=#a0a0b0"
-
 set -g status-left-length 40
 set -g status-left "#[bg=#1f1f23,fg=#c8c8dc,bold]  SkywareOS #[bg=#0e0e10,fg=#2a2a2f]#[default] "
-
 set -g status-right-length 80
 set -g status-right "#[fg=#4a4a58]  #[fg=#7a7a8a]%H:%M  #[fg=#4a4a58]  #[fg=#7a7a8a]%d %b  #[fg=#4a4a58]  #[fg=#7a7a8a]#H "
-
-# Active window tab
 setw -g window-status-current-format "#[bg=#1f1f23,fg=#c8c8dc,bold] #I #W #[default]"
-setw -g window-status-format         "#[fg=#4a4a58] #I #W "
+setw -g window-status-format "#[fg=#4a4a58] #I #W "
 setw -g window-status-separator ""
-
-# Pane borders
-set -g pane-border-style        "fg=#2a2a2f"
+set -g pane-border-style "fg=#2a2a2f"
 set -g pane-active-border-style "fg=#a0a0b0"
-
-# ── Splits ────────────────────────────────────────────────────
 bind | split-window -h -c "#{pane_current_path}"
 bind - split-window -v -c "#{pane_current_path}"
-
-# Vim-style pane navigation
 bind h select-pane -L
 bind j select-pane -D
 bind k select-pane -U
 bind l select-pane -R
-
-# Resize panes
 bind -r H resize-pane -L 5
 bind -r J resize-pane -D 5
 bind -r K resize-pane -U 5
 bind -r L resize-pane -R 5
-
-# Reload config
 bind r source-file ~/.tmux.conf \; display "Config reloaded"
 EOF
-
-echo "✔ Tmux configured with Skyware theme"
-echo "  → Prefix: Ctrl+Space  |  Split: prefix + | or -  |  Nav: prefix + h/j/k/l"
+echo "✔ Tmux configured"
 
 # ============================================================
 # Custom Pacman progress bar
+# FIX #5: also clean any remaining [community] lines not caught earlier
 # ============================================================
 echo "== Customizing pacman =="
-
 sudo cp /etc/pacman.conf /etc/pacman.conf.bak
-
-# Enable Color, VerbosePkgLists, ILoveCandy (pacman easter egg bar),
-# and parallel downloads
 sudo python3 << 'PYEOF'
 with open("/etc/pacman.conf", "r") as f:
     content = f.read()
@@ -2379,40 +2052,28 @@ replacements = {
     "#ParallelDownloads": "ParallelDownloads",
     "ParallelDownloads = 5": "ParallelDownloads = 10",
 }
-
 for old, new in replacements.items():
     content = content.replace(old, new)
 
 with open("/etc/pacman.conf", "w") as f:
     f.write(content)
-
-print("✔ Pacman: Color + ILoveCandy Pac-Man progress bar + 10 parallel downloads enabled")
+print("✔ Pacman: Color + ILoveCandy + 10 parallel downloads enabled")
 PYEOF
 
 # ============================================================
 # GameMode + MangoHud
 # ============================================================
 echo "== Setting up gaming performance tools =="
-
-# multilib must be enabled before lib32-* packages can be installed
 if ! grep -q "^\[multilib\]" /etc/pacman.conf; then
-    echo "→ Enabling multilib repository..."
     echo -e "\n[multilib]\nInclude = /etc/pacman.d/mirrorlist" | sudo tee -a /etc/pacman.conf >/dev/null
     sudo pacman -Sy --noconfirm
     echo "✔ multilib enabled"
 fi
-
 sudo pacman -S --noconfirm --needed gamemode lib32-gamemode mangohud lib32-mangohud
-
-# Add user to gamemode group
 sudo gpasswd -a "$USER" gamemode 2>/dev/null || true
 
-# MangoHud global config — clean minimal overlay
 mkdir -p "$HOME/.config/MangoHud"
 cat > "$HOME/.config/MangoHud/MangoHud.conf" << 'EOF'
-# SkywareOS MangoHud config
-
-# Layout
 legacy_layout=false
 hud_compact=false
 background_alpha=0.4
@@ -2421,8 +2082,6 @@ round_corners=8
 offset_x=12
 offset_y=12
 position=top-left
-
-# Color scheme (matches SkywareOS gray palette)
 background_color=111113
 text_color=e2e2ec
 gpu_color=a0a0b0
@@ -2433,8 +2092,6 @@ fps_color_change=1
 fps_value=30,60
 fps_color=f87171,facc15,4ade80
 frame_timing_color=a78bfa
-
-# What to show
 fps=1
 frame_timing=1
 cpu_stats=1
@@ -2445,85 +2102,52 @@ vram=1
 ram=1
 time=1
 time_format=%H:%M
-
-# Triggered with Shift+F12
 toggle_hud=Shift_F12
 EOF
-
-echo "✔ GameMode installed — prefix game launch with: gamemoderun %command%"
-echo "✔ MangoHud installed — toggle overlay with Shift+F12"
-echo "  → For Steam: add 'MANGOHUD=1 gamemoderun %command%' to launch options"
+echo "✔ GameMode + MangoHud installed"
 
 # ============================================================
-# Proton / Wine for Windows games
+# Wine (wow64 — no lib32 Wine deps needed since Arch Wine 9+)
+# FIX #3: Wine is now a pure wow64 build, remove the redundant lib32-* list
 # ============================================================
-echo "== Setting up Proton/Wine =="
-
-# multilib already enabled above in GameMode section — just refresh if needed
+echo "== Setting up Wine =="
 sudo pacman -Sy --noconfirm 2>/dev/null || true
-
 sudo pacman -S --noconfirm --needed \
     wine wine-mono wine-gecko winetricks \
     lib32-vulkan-icd-loader vulkan-icd-loader \
-    lib32-mesa mesa \
-    giflib lib32-giflib libpng lib32-libpng libldap lib32-libldap \
-    gnutls lib32-gnutls mpg123 lib32-mpg123 openal lib32-openal \
-    v4l-utils lib32-v4l-utils libpulse lib32-libpulse alsa-plugins \
-    lib32-alsa-plugins alsa-lib lib32-alsa-lib libjpeg-turbo \
-    lib32-libjpeg-turbo sqlite lib32-sqlite libxcomposite lib32-libxcomposite
-
-# Proton-GE (better Proton build for non-Steam games) via AUR
+    lib32-mesa mesa
+# Note: the long list of lib32-* wine deps (libpulse, openal, mpg123, etc.)
+# is no longer needed with the wow64 build. Vulkan loaders kept for gaming.
 if command -v paru &>/dev/null; then
     paru -S --noconfirm proton-ge-custom-bin 2>/dev/null || \
         echo "⚠ proton-ge-custom-bin not found, install manually"
 fi
-
-# Lutris for game library management
 sudo pacman -S --noconfirm --needed lutris
-
-echo "✔ Wine + Winetricks installed"
-echo "✔ Lutris installed (open Lutris to install Windows games)"
-echo "✔ Proton-GE installed (Steam → Settings → Compatibility → Proton-GE)"
+echo "✔ Wine (wow64) + Lutris installed"
 
 # ============================================================
-# ware doctor — AI repair mode (Claude API)
+# AI Doctor
 # ============================================================
 echo "== Adding AI repair to ware doctor =="
-
-# Patch the ware doctor function to optionally query Claude API
-# when it finds issues. The user provides their API key via
-# ANTHROPIC_API_KEY env var or ~/.config/skyware/api_key
-
 sudo tee /usr/local/bin/ware-ai-doctor > /dev/null << 'EOF'
 #!/bin/bash
-# SkywareOS AI Doctor — sends system errors to Claude for fix suggestions
-# Usage: ware-ai-doctor   (run after ware doctor finds issues)
-
 RED="\e[31m"; CYAN="\e[36m"; GREEN="\e[32m"; YELLOW="\e[33m"; RESET="\e[0m"
-
 KEY_FILE="$HOME/.config/skyware/api_key"
 API_KEY="${ANTHROPIC_API_KEY:-}"
-
 if [ -z "$API_KEY" ] && [ -f "$KEY_FILE" ]; then
     API_KEY=$(cat "$KEY_FILE")
 fi
-
 if [ -z "$API_KEY" ]; then
     echo -e "${YELLOW}→ No Anthropic API key found.${RESET}"
     echo -e "  Set it with: mkdir -p ~/.config/skyware && echo 'sk-ant-...' > ~/.config/skyware/api_key"
-    echo -e "  Or export ANTHROPIC_API_KEY=sk-ant-..."
     exit 1
 fi
-
 echo -e "${CYAN}== SkywareOS AI Doctor ==${RESET}"
 echo -e "${CYAN}→ Collecting system diagnostics...${RESET}"
-
-# Gather context
 ERRORS=$(sudo journalctl -p err -b --no-pager -n 30 2>/dev/null)
 FAILED=$(systemctl --failed --no-legend 2>/dev/null)
 PACMAN_LOG=$(tail -n 20 /var/log/pacman.log 2>/dev/null)
 OS_INFO="SkywareOS Crimson 1.0 (Arch-based), kernel $(uname -r)"
-
 PROMPT="You are a Linux system repair assistant for SkywareOS (an Arch-based distro). \
 Analyze these system diagnostics and provide specific, actionable fix commands. \
 Be concise — list the issues found and the exact commands to fix them. \
@@ -2542,7 +2166,6 @@ $PACMAN_LOG"
 
 echo -e "${CYAN}→ Querying Claude for diagnosis...${RESET}"
 echo ""
-
 RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
     -H "x-api-key: $API_KEY" \
     -H "anthropic-version: 2023-06-01" \
@@ -2553,7 +2176,6 @@ RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
         \"messages\": [{\"role\": \"user\", \"content\": $(echo "$PROMPT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}]
     }" 2>/dev/null)
 
-# Extract text from response
 RESULT=$(echo "$RESPONSE" | python3 -c "
 import json, sys
 try:
@@ -2567,38 +2189,13 @@ echo -e "${GREEN}── AI Diagnosis ──────────────�
 echo "$RESULT"
 echo -e "${GREEN}─────────────────────────────────────────────${RESET}"
 EOF
-
 sudo chmod +x /usr/local/bin/ware-ai-doctor
-
-# Patch ware doctor() to prompt for AI repair at the end
-# Write patcher to temp file to avoid heredoc quoting issues
-cat > /tmp/skyware-patch-doctor.py << 'INNEREOF'
-import sys
-path = sys.argv[1]
-with open(path) as f:
-    src = f.read()
-target = 'echo ""; echo -e "${GREEN}Diagnostics complete.${RESET}"\n}'
-replacement = 'echo ""; echo -e "${GREEN}Diagnostics complete.${RESET}"\n}'
-if target in src:
-    src = src.replace(target, replacement, 1)
-    with open(path, "w") as f:
-        f.write(src)
-    print("AI doctor prompt patched into ware doctor")
-else:
-    print("Warning: doctor closing not found, skipping AI patch")
-INNEREOF
-sudo python3 /tmp/skyware-patch-doctor.py /usr/local/bin/ware
-
-echo "✔ AI Doctor installed at /usr/local/bin/ware-ai-doctor"
-echo "  → Run: ware doctor  (then choose AI repair)"
-echo "  → Or directly: ware-ai-doctor"
-echo "  → Set API key: echo 'sk-ant-...' > ~/.config/skyware/api_key"
+echo "✔ AI Doctor installed"
 
 # ============================================================
-# SkywareOS Welcome App (first-boot wizard)
+# Welcome App
 # ============================================================
 echo "== Installing SkywareOS Welcome App =="
-
 sudo mkdir -p /opt/skyware-welcome/src
 
 sudo tee /opt/skyware-welcome/package.json > /dev/null << 'EOF'
@@ -2617,49 +2214,21 @@ sudo tee /opt/skyware-welcome/main.js > /dev/null << 'EOF'
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
-
 const DONE_FLAG = path.join(require('os').homedir(), '.config/skyware/welcome-done');
-
 function createWindow() {
   if (fs.existsSync(DONE_FLAG)) { app.quit(); return; }
-
   const win = new BrowserWindow({
-    width: 760, height: 540,
-    frame: false, center: true,
+    width: 760, height: 540, frame: false, center: true,
     backgroundColor: '#111113', resizable: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-    },
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
     title: 'Welcome to SkywareOS',
   });
-
   const distIndex = path.join(__dirname, 'dist', 'index.html');
-  if (fs.existsSync(distIndex)) {
-    win.loadFile(distIndex);
-  } else {
-    win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent([
-      '<!DOCTYPE html><html><head><style>',
-      'body{background:#111113;color:#e2e2ec;font-family:sans-serif;',
-      'display:flex;align-items:center;justify-content:center;',
-      'height:100vh;margin:0;flex-direction:column;gap:16px;}',
-      'code{background:#18181b;padding:10px 18px;border-radius:8px;',
-      'color:#f87171;font-size:13px;border:1px solid #2a2a2f;}',
-      'p{color:#7a7a8a;font-size:14px;}',
-      '</style></head><body>',
-      '<div style="font-size:28px">\u26a0</div>',
-      '<div style="font-size:17px;font-weight:600">Build not found</div>',
-      '<p>Run to rebuild:</p>',
-      '<code>cd /opt/skyware-welcome && npm install && npx vite build</code>',
-      '</body></html>'
-    ].join('')));
-  }
+  fs.existsSync(distIndex) ? win.loadFile(distIndex) : win.loadURL('about:blank');
 }
-
 ipcMain.on('finish',    () => { fs.mkdirSync(path.dirname(DONE_FLAG), { recursive: true }); fs.writeFileSync(DONE_FLAG, ''); app.quit(); });
 ipcMain.on('open-link', (_, url) => shell.openExternal(url));
 ipcMain.on('win-close', (e) => BrowserWindow.fromWebContents(e.sender).close());
-
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => app.quit());
 EOF
@@ -2680,18 +2249,9 @@ export default defineConfig({ plugins: [react()], base: './', build: { outDir: '
 EOF
 
 sudo tee /opt/skyware-welcome/index.html > /dev/null << 'EOF'
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8"/>
-    <title>Welcome to SkywareOS</title>
-    <style>* { margin:0; padding:0; box-sizing:border-box; } body { overflow:hidden; background:#111113; } #root { height:100vh; }</style>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><title>Welcome to SkywareOS</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{overflow:hidden;background:#111113;}#root{height:100vh;}</style>
+</head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>
 EOF
 
 sudo tee /opt/skyware-welcome/src/main.jsx > /dev/null << 'EOF'
@@ -2703,46 +2263,27 @@ EOF
 
 sudo tee /opt/skyware-welcome/src/App.jsx > /dev/null << 'APPEOF'
 import { useState } from "react";
-
-const C = {
-  bg:"#111113", card:"#18181b", border:"#2a2a2f", accent:"#a0a0b0",
-  accentHi:"#c8c8dc", text:"#e2e2ec", dim:"#7a7a8a", muted:"#4a4a58",
-  green:"#4ade80", blue:"#60a5fa", yellow:"#facc15",
-};
-
-const STEPS = [
-  { id:"welcome",  label:"Welcome"  },
-  { id:"features", label:"Features" },
-  { id:"tools",    label:"Tools"    },
-  { id:"done",     label:"Done"     },
-];
-
+const C = { bg:"#111113",card:"#18181b",border:"#2a2a2f",accent:"#a0a0b0",accentHi:"#c8c8dc",text:"#e2e2ec",dim:"#7a7a8a",muted:"#4a4a58",green:"#4ade80",blue:"#60a5fa",yellow:"#facc15" };
+const STEPS = [{id:"welcome",label:"Welcome"},{id:"features",label:"Features"},{id:"tools",label:"Tools"},{id:"done",label:"Done"}];
 const FEATURES = [
-  { icon:"⬡", title:"ware",         desc:"Unified package manager — wraps pacman, flatpak, and AUR in one command." },
-  { icon:"⚙", title:"Settings App", desc:"GUI control panel for all ware commands. Launch with: skyware-settings" },
-  { icon:"⚡", title:"GameMode",     desc:"Auto-boosts CPU/GPU when a game launches. Add gamemoderun to Steam." },
-  { icon:"◈", title:"AI Doctor",    desc:"ware doctor can query Claude API to diagnose and fix system issues." },
-  { icon:"🔒", title:"AppArmor",    desc:"Mandatory access control enabled by default for extra security." },
-  { icon:"◉", title:"Environments", desc:"Install Hyprland, Niri, or MangoWC with a single ware setup command." },
+  {icon:"⬡",title:"ware",desc:"Unified package manager — wraps pacman, flatpak, and AUR."},
+  {icon:"⚙",title:"Settings App",desc:"GUI control panel. Launch with: skyware-settings"},
+  {icon:"⚡",title:"GameMode",desc:"Auto-boosts CPU/GPU for gaming. Add gamemoderun to Steam."},
+  {icon:"◈",title:"AI Doctor",desc:"ware-ai-doctor queries Claude API to diagnose system issues."},
+  {icon:"🔒",title:"AppArmor",desc:"Mandatory access control enabled by default."},
+  {icon:"◉",title:"Wayland",desc:"Wayland-first — all DEs default to Wayland sessions."},
 ];
-
 const LINKS = [
-  { label:"GitHub",        url:"https://github.com/SkywareSW/SkywareOS"       },
-  { label:"Website",       url:"https://skywaresw.github.io/SkywareOS"        },
-  { label:"ware help",     url:null, cmd:"ware help"                           },
+  {label:"GitHub",url:"https://github.com/SkywareSW/SkywareOS"},
+  {label:"Website",url:"https://skywaresw.github.io/SkywareOS"},
 ];
-
 export default function App() {
-  const [step, setStep] = useState(0);
-  const current = STEPS[step];
-
-  const next = () => step < STEPS.length - 1 ? setStep(step + 1) : window.welcome?.finish();
-  const prev = () => setStep(step - 1);
-
+  const [step,setStep]=useState(0);
+  const current=STEPS[step];
+  const next=()=>step<STEPS.length-1?setStep(step+1):window.welcome?.finish();
+  const prev=()=>setStep(step-1);
   return (
-    <div style={{height:"100vh",background:C.bg,fontFamily:"'Segoe UI','SF Pro Display',system-ui,sans-serif",color:C.text,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-
-      {/* Title bar */}
+    <div style={{height:"100vh",background:C.bg,fontFamily:"'Segoe UI',system-ui,sans-serif",color:C.text,display:"flex",flexDirection:"column",overflow:"hidden"}}>
       <div style={{height:"44px",background:"#0c0c0e",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 16px",WebkitAppRegion:"drag",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
           <div style={{width:"20px",height:"20px",borderRadius:"4px",background:`linear-gradient(135deg,${C.accent},#505060)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:900,color:"#fff"}}>S</div>
@@ -2750,26 +2291,18 @@ export default function App() {
         </div>
         <button onClick={()=>window.welcome?.close()} style={{WebkitAppRegion:"no-drag",background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:"16px"}}>×</button>
       </div>
-
-      {/* Step indicators */}
       <div style={{display:"flex",justifyContent:"center",gap:"8px",padding:"20px 0 0",flexShrink:0}}>
         {STEPS.map((s,i)=>(
           <div key={s.id} style={{display:"flex",alignItems:"center",gap:"8px"}}>
-            <div style={{width:"24px",height:"24px",borderRadius:"50%",background:i<=step?C.accent:"transparent",border:`1px solid ${i<=step?C.accent:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",color:i<=step?"#111":C.muted,fontWeight:600,transition:"all 0.2s"}}>{i+1}</div>
-            {i<STEPS.length-1&&<div style={{width:"32px",height:"1px",background:i<step?C.accent:C.border,transition:"all 0.2s"}}/>}
+            <div style={{width:"24px",height:"24px",borderRadius:"50%",background:i<=step?C.accent:"transparent",border:`1px solid ${i<=step?C.accent:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",color:i<=step?"#111":C.muted,fontWeight:600}}>{i+1}</div>
+            {i<STEPS.length-1&&<div style={{width:"32px",height:"1px",background:i<step?C.accent:C.border}}/>}
           </div>
         ))}
       </div>
-
-      {/* Content */}
       <div style={{flex:1,padding:"28px 40px",overflowY:"auto"}}>
-
         {current.id==="welcome"&&(
           <div style={{textAlign:"center",paddingTop:"8px"}}>
-            <div style={{fontSize:"48px",marginBottom:"16px"}}>
-              {`      @@@@@\n    @@@@@@@@@\n   @@@     @@@\n  @@@       @@@\n  @@@       @@@\n   @@@     @@@\n    @@@@@@@@@\n      @@@@@`}
-            </div>
-            <div style={{fontFamily:"monospace",fontSize:"11px",color:C.muted,lineHeight:1.6,marginBottom:"20px",whiteSpace:"pre"}}{...{}}>
+            <div style={{fontFamily:"monospace",fontSize:"11px",color:C.muted,lineHeight:1.6,marginBottom:"20px",whiteSpace:"pre"}}>
 {`      @@@@@@@-         +@@@@@@.
     %@@@@@@@@@@=      @@@@@@@@@@
    @@@@     @@@@@      -     #@@@
@@ -2782,10 +2315,9 @@ export default function App() {
       @@@@@@+          %@@@@@@`}
             </div>
             <h1 style={{fontSize:"28px",fontWeight:700,marginBottom:"8px",letterSpacing:"-0.03em"}}>Welcome to <span style={{color:C.accentHi}}>SkywareOS</span></h1>
-            <p style={{color:C.dim,fontSize:"14px",lineHeight:1.6,maxWidth:"400px",margin:"0 auto"}}>An Arch-based Linux distro built for performance, customization, and a clean out-of-the-box experience.</p>
+            <p style={{color:C.dim,fontSize:"14px",lineHeight:1.6,maxWidth:"400px",margin:"0 auto"}}>An Arch-based Linux distro built for performance, customization, and a clean Wayland-first experience.</p>
           </div>
         )}
-
         {current.id==="features"&&(
           <div>
             <h2 style={{fontSize:"18px",fontWeight:600,marginBottom:"6px"}}>What's included</h2>
@@ -2794,16 +2326,12 @@ export default function App() {
               {FEATURES.map(f=>(
                 <div key={f.title} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"8px",padding:"14px 16px",display:"flex",gap:"12px",alignItems:"flex-start"}}>
                   <span style={{fontSize:"20px",flexShrink:0}}>{f.icon}</span>
-                  <div>
-                    <div style={{fontWeight:600,fontSize:"13px",marginBottom:"3px"}}>{f.title}</div>
-                    <div style={{color:C.dim,fontSize:"12px",lineHeight:1.5}}>{f.desc}</div>
-                  </div>
+                  <div><div style={{fontWeight:600,fontSize:"13px",marginBottom:"3px"}}>{f.title}</div><div style={{color:C.dim,fontSize:"12px",lineHeight:1.5}}>{f.desc}</div></div>
                 </div>
               ))}
             </div>
           </div>
         )}
-
         {current.id==="tools"&&(
           <div>
             <h2 style={{fontSize:"18px",fontWeight:600,marginBottom:"6px"}}>Useful links</h2>
@@ -2811,26 +2339,22 @@ export default function App() {
             <div style={{display:"flex",flexDirection:"column",gap:"8px"}}>
               {LINKS.map(l=>(
                 <div key={l.label} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"8px",padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <span style={{fontSize:"13px",color:C.text}}>{l.label}</span>
-                  {l.url
-                    ? <button onClick={()=>window.welcome?.openLink(l.url)} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.accentHi,borderRadius:"5px",padding:"5px 12px",cursor:"pointer",fontSize:"12px",fontFamily:"inherit"}}>Open</button>
-                    : <span style={{fontFamily:"monospace",fontSize:"12px",color:C.muted}}>{l.cmd}</span>
-                  }
+                  <span style={{fontSize:"13px"}}>{l.label}</span>
+                  <button onClick={()=>window.welcome?.openLink(l.url)} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.accentHi,borderRadius:"5px",padding:"5px 12px",cursor:"pointer",fontSize:"12px",fontFamily:"inherit"}}>Open</button>
                 </div>
               ))}
             </div>
           </div>
         )}
-
         {current.id==="done"&&(
           <div style={{textAlign:"center",paddingTop:"20px"}}>
             <div style={{fontSize:"48px",marginBottom:"16px"}}>✔</div>
             <h2 style={{fontSize:"22px",fontWeight:700,marginBottom:"8px",color:C.green}}>You're all set</h2>
-            <p style={{color:C.dim,fontSize:"14px",lineHeight:1.6,maxWidth:"360px",margin:"0 auto 24px"}}>SkywareOS is ready. Open the Settings app anytime with <span style={{color:C.accentHi,fontFamily:"monospace"}}>skyware-settings</span> or find it in your app launcher.</p>
+            <p style={{color:C.dim,fontSize:"14px",lineHeight:1.6,maxWidth:"360px",margin:"0 auto 24px"}}>SkywareOS is ready. Open settings anytime with <span style={{color:C.accentHi,fontFamily:"monospace"}}>skyware-settings</span>.</p>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"8px",padding:"14px 20px",display:"inline-block",textAlign:"left"}}>
               <div style={{fontFamily:"monospace",fontSize:"12px",color:C.dim,lineHeight:2}}>
                 <div><span style={{color:C.accent}}>$</span> ware help</div>
-                <div><span style={{color:C.accent}}>$</span> ware install &lt;pkg&gt;</div>
+                <div><span style={{color:C.accent}}>$</span> ware install {'<pkg>'}</div>
                 <div><span style={{color:C.accent}}>$</span> ware settings</div>
                 <div><span style={{color:C.accent}}>$</span> ware doctor</div>
               </div>
@@ -2838,50 +2362,39 @@ export default function App() {
           </div>
         )}
       </div>
-
-      {/* Nav buttons */}
       <div style={{padding:"16px 40px",borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",flexShrink:0,background:"#0c0c0e"}}>
-        <button onClick={prev} disabled={step===0}
-          style={{background:"transparent",border:`1px solid ${C.border}`,color:step===0?C.muted:C.text,borderRadius:"7px",padding:"9px 20px",cursor:step===0?"not-allowed":"pointer",fontSize:"13px",fontFamily:"inherit",opacity:step===0?0.4:1}}>
-          ← Back
-        </button>
-        <button onClick={next}
-          style={{background:C.accentHi,border:"none",color:"#111",borderRadius:"7px",padding:"9px 24px",cursor:"pointer",fontSize:"13px",fontFamily:"inherit",fontWeight:600}}>
-          {step===STEPS.length-1?"Get Started →":"Next →"}
-        </button>
+        <button onClick={prev} disabled={step===0} style={{background:"transparent",border:`1px solid ${C.border}`,color:step===0?C.muted:C.text,borderRadius:"7px",padding:"9px 20px",cursor:step===0?"not-allowed":"pointer",fontSize:"13px",fontFamily:"inherit",opacity:step===0?0.4:1}}>← Back</button>
+        <button onClick={next} style={{background:C.accentHi,border:"none",color:"#111",borderRadius:"7px",padding:"9px 24px",cursor:"pointer",fontSize:"13px",fontFamily:"inherit",fontWeight:600}}>{step===STEPS.length-1?"Get Started →":"Next →"}</button>
       </div>
     </div>
   );
 }
 APPEOF
 
-# Build it — as real user, not sudo
+# FIX #10: use local electron, not sudo npm install -g
 sudo chown -R "$USER:$USER" /opt/skyware-welcome
 cd /opt/skyware-welcome
 npm install 2>&1 | tail -5
+npm install --save-dev electron 2>&1 | tail -3
 npx vite build 2>&1 | tail -5
-
 if [ ! -f /opt/skyware-welcome/dist/index.html ]; then
     echo "✖ Welcome app build failed — retrying:"
     npx vite build
 fi
-
-echo "✔ Welcome app built → /opt/skyware-welcome/dist/index.html"
+echo "✔ Welcome app built"
 sudo chown -R root:root /opt/skyware-welcome
 sudo chmod -R a+rX /opt/skyware-welcome
 
-# Launcher
 sudo tee /usr/local/bin/skyware-welcome > /dev/null << 'EOF'
 #!/bin/bash
-exec electron /opt/skyware-welcome "$@"
+cd /opt/skyware-welcome
+exec npx electron . "$@"
 EOF
 sudo chmod +x /usr/local/bin/skyware-welcome
 
-# .desktop entry
 sudo tee /usr/share/applications/skyware-welcome.desktop > /dev/null << 'EOF'
 [Desktop Entry]
 Name=Welcome to SkywareOS
-Comment=SkywareOS first-boot setup wizard
 Exec=/usr/local/bin/skyware-welcome
 Icon=dialog-information
 Terminal=false
@@ -2890,7 +2403,6 @@ Categories=System;
 NoDisplay=true
 EOF
 
-# Autostart on first login (removes itself after running once)
 mkdir -p "$HOME/.config/autostart"
 cat > "$HOME/.config/autostart/skyware-welcome.desktop" << 'EOF'
 [Desktop Entry]
@@ -2899,129 +2411,85 @@ Exec=/usr/local/bin/skyware-welcome
 Type=Application
 X-GNOME-Autostart-enabled=true
 EOF
-
-echo "✔ Welcome app installed — will launch automatically on first login"
+echo "✔ Welcome app installed"
 
 # ============================================================
-# OTA update notification (system tray)
+# OTA Update Notifier
 # ============================================================
 echo "== Setting up OTA update notifier =="
-
 sudo pacman -S --noconfirm --needed libnotify python-gobject gtk3
 
 sudo tee /usr/local/bin/skyware-update-notifier > /dev/null << 'EOF'
 #!/usr/bin/env python3
-"""
-SkywareOS Update Notifier
-Runs as a systemd user timer, checks for updates and sends a desktop notification.
-"""
-import subprocess
-import os
-import sys
+import subprocess, sys
 
 def count_updates():
     try:
-        result = subprocess.run(
-            ["checkupdates"], capture_output=True, text=True, timeout=30
-        )
-        pacman_updates = len([l for l in result.stdout.splitlines() if l.strip()])
+        r = subprocess.run(["checkupdates"], capture_output=True, text=True, timeout=30)
+        pacman = len([l for l in r.stdout.splitlines() if l.strip()])
     except Exception:
-        pacman_updates = 0
-
+        pacman = 0
     try:
-        result = subprocess.run(
-            ["flatpak", "remote-ls", "--updates"],
-            capture_output=True, text=True, timeout=30
-        )
-        flatpak_updates = len([l for l in result.stdout.splitlines() if l.strip()])
+        r = subprocess.run(["flatpak","remote-ls","--updates"], capture_output=True, text=True, timeout=30)
+        flatpak = len([l for l in r.stdout.splitlines() if l.strip()])
     except Exception:
-        flatpak_updates = 0
-
-    return pacman_updates, flatpak_updates
+        flatpak = 0
+    return pacman, flatpak
 
 def notify(pacman, flatpak):
     total = pacman + flatpak
     if total == 0:
         return
-
     parts = []
-    if pacman > 0:
-        parts.append(f"{pacman} pacman")
-    if flatpak > 0:
-        parts.append(f"{flatpak} flatpak")
-
+    if pacman > 0: parts.append(f"{pacman} pacman")
+    if flatpak > 0: parts.append(f"{flatpak} flatpak")
     summary = f"SkywareOS: {total} update{'s' if total > 1 else ''} available"
     body = f"{', '.join(parts)} package{'s' if total > 1 else ''} can be updated.\nRun: ware update"
-
-    subprocess.run([
-        "notify-send",
-        "--app-name=SkywareOS",
-        "--icon=system-software-update",
-        "--urgency=normal",
-        "--expire-time=8000",
-        summary,
-        body,
-    ])
+    subprocess.run(["notify-send","--app-name=SkywareOS","--icon=system-software-update",
+                    "--urgency=normal","--expire-time=8000",summary,body])
 
 if __name__ == "__main__":
-    pacman, flatpak = count_updates()
-    notify(pacman, flatpak)
+    p, f = count_updates()
+    notify(p, f)
     sys.exit(0)
 EOF
-
 sudo chmod +x /usr/local/bin/skyware-update-notifier
 
-# systemd user timer — checks every 6 hours
 mkdir -p "$HOME/.config/systemd/user"
-
 cat > "$HOME/.config/systemd/user/skyware-updates.service" << 'EOF'
 [Unit]
 Description=SkywareOS Update Notifier
-
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/skyware-update-notifier
 EOF
-
 cat > "$HOME/.config/systemd/user/skyware-updates.timer" << 'EOF'
 [Unit]
 Description=SkywareOS Update Check (every 6 hours)
-
 [Timer]
 OnBootSec=5min
 OnUnitActiveSec=6h
 Persistent=true
-
 [Install]
 WantedBy=default.target
 EOF
-
 systemctl --user enable skyware-updates.timer 2>/dev/null || true
 systemctl --user start  skyware-updates.timer 2>/dev/null || true
-
-echo "✔ Update notifier installed — desktop notification every 6 hours when updates are available"
-
-
+echo "✔ Update notifier installed"
 
 # ============================================================
-# Auto-mount external drives (udiskie)
+# Auto-mount (udiskie)
 # ============================================================
 echo "== Setting up auto-mount for external drives =="
-
 sudo pacman -S --noconfirm --needed udiskie udisks2 gvfs
-
-# Autostart udiskie with system tray icon (shows mount/unmount notifications)
 mkdir -p "$HOME/.config/autostart"
 cat > "$HOME/.config/autostart/udiskie.desktop" << 'EOF'
 [Desktop Entry]
 Name=udiskie
-Comment=Automount removable media
 Exec=udiskie --tray --notify --appindicator
 Type=Application
 X-GNOME-Autostart-enabled=true
 EOF
-
-# udiskie config — auto-mount, show notifications, use Dolphin to open
 mkdir -p "$HOME/.config/udiskie"
 cat > "$HOME/.config/udiskie/config.yml" << 'EOF'
 program_options:
@@ -3029,195 +2497,102 @@ program_options:
   notify: true
   automount: true
   appindicator: true
-
 notifications:
   timeout: 4
-  device_mounted: "  {device_presentation} mounted at {mount_path}"
-  device_unmounted: "  {device_presentation} unmounted"
-  device_added: "  {device_presentation} connected"
-  device_removed: "  {device_presentation} removed"
-
-device_config:
-  - options:
-      fstype: vfat
-      options: uid={user},gid={group},utf8
 EOF
-
-# Start it immediately for the current session
 udiskie --tray --notify --appindicator &>/dev/null &
 disown
-
-echo "✔ udiskie installed — external drives will auto-mount with tray icon"
-echo "  → Config: ~/.config/udiskie/config.yml"
+echo "✔ udiskie installed"
 
 # ============================================================
-# Fingerprint reader (fprint)
+# Fingerprint Reader (fprint)
 # ============================================================
 echo "== Setting up fingerprint reader =="
-
 sudo pacman -S --noconfirm --needed fprintd libfprint
-
-# Enable fingerprint for sudo + login PAM
-# Insert fingerprint auth into PAM stack — before password
 for PAM_FILE in /etc/pam.d/sudo /etc/pam.d/login /etc/pam.d/sddm; do
     if [ -f "$PAM_FILE" ] && ! grep -q "pam_fprintd" "$PAM_FILE"; then
-        # Insert fprintd line after the first 'auth' line
         sudo sed -i '0,/^auth/s/^auth/auth\t\tsufficient\tpam_fprintd.so\nauth/' "$PAM_FILE"
         echo "✔ Fingerprint auth added to $PAM_FILE"
     fi
 done
-
-# Enable the fprintd service
 sudo systemctl enable fprintd
-
 echo "✔ Fingerprint reader support installed"
-echo "  → Enroll a finger: fprintd-enroll"
-echo "  → Verify:          fprintd-verify"
-echo "  → Works at sudo prompt and login screen"
 
 # ============================================================
-# Auto-detect and configure second monitors
+# Multi-monitor auto-detect (autorandr — X11 fallback)
 # ============================================================
-echo "== Setting up multi-monitor auto-detection =="
-
+echo "== Setting up multi-monitor support =="
 sudo pacman -S --noconfirm --needed autorandr xorg-xrandr
-
-# autorandr: saves and restores monitor layouts automatically
-# Detect current layout and save it as the default "home" profile
 autorandr --save skyware-default 2>/dev/null || true
-
-# Create a udev rule that triggers autorandr when a display is connected
 sudo tee /etc/udev/rules.d/99-skyware-autorandr.rules > /dev/null << 'EOF'
-# SkywareOS: auto-configure displays when connected/disconnected
 ACTION=="change", SUBSYSTEM=="drm", RUN+="/bin/sh -c 'su $(loginctl list-sessions --no-legend | awk \"{print \$5}\" | head -1) -c \"DISPLAY=:0 XAUTHORITY=/home/$(loginctl list-sessions --no-legend | awk \"{print \$5}\" | head -1)/.Xauthority autorandr --change\"'"
 EOF
-
 sudo udevadm control --reload-rules 2>/dev/null || true
-
-# KDE-specific: enable KScreen for Wayland/X11 monitor hot-plug
+# On Wayland, KScreen handles hot-plug natively — install it
 sudo pacman -S --noconfirm --needed kscreen 2>/dev/null || true
-
-# Write a sensible default autorandr hook script
-mkdir -p "$HOME/.config/autorandr"
-cat > "$HOME/.config/autorandr/postswitch" << 'EOF'
-#!/bin/bash
-# Runs after autorandr switches profile
-# Restart compositor/panels to pick up new layout
-if command -v qdbus6 &>/dev/null; then
-    qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
-fi
-if command -v xwallpaper &>/dev/null; then
-    xwallpaper --zoom /usr/share/sddm/themes/breeze/background.png 2>/dev/null || true
-fi
-notify-send "SkywareOS" "Display layout updated" --icon=display 2>/dev/null || true
-EOF
-chmod +x "$HOME/.config/autorandr/postswitch"
-
-echo "✔ autorandr installed — monitor layouts saved and auto-restored on plug/unplug"
-echo "  → Save current layout:    autorandr --save <name>"
-echo "  → List saved layouts:     autorandr --list"
-echo "  → Force apply a profile:  autorandr --load <name>"
+echo "✔ Multi-monitor support configured (KScreen for Wayland, autorandr for X11)"
 
 # ============================================================
-# KDE window rules (rounded corners, gaps, snap assist)
+# KDE Window Rules — Wayland compositor tweaks
+# FIX #9: guard behind KDE install check
 # ============================================================
-echo "== Applying KDE window rules and compositor tweaks =="
-
-if pacman -Q plasma-desktop &>/dev/null; then
-
-    # ── KWin compositor settings ─────────────────────────────
-    # Enable OpenGL compositing, vsync, rounded corners via KWin script
+echo "== Applying KDE window rules =="
+if pacman -Q plasma-desktop &>/dev/null && command -v kwriteconfig6 &>/dev/null; then
     kwriteconfig6 --file kwinrc --group Compositing \
         --key Backend "OpenGL" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Compositing \
-        --key GLTextureFilter "2" 2>/dev/null || true
-    kwriteconfig6 --file kwinrc --group Compositing \
-        --key HiddenPreviews "5" 2>/dev/null || true
-    kwriteconfig6 --file kwinrc --group Compositing \
-        --key LatencyPolicy "Medium" 2>/dev/null || true
-    kwriteconfig6 --file kwinrc --group Compositing \
         --key Enabled "true" 2>/dev/null || true
-
-    # ── Rounded corners via KWin effect ──────────────────────
-    # Enable the built-in RoundedCorners effect (available in KWin 5.25+)
     kwriteconfig6 --file kwinrc --group Effect-kwin4_effect_roundcorners \
         --key Enabled "true" 2>/dev/null || true
-    # Roundness: 0–20, 12 is a tasteful macOS-like radius
     kwriteconfig6 --file kwinrc --group Effect-kwin4_effect_roundcorners \
         --key Roundness "12" 2>/dev/null || true
-
-    # ── Window gaps via KWin tiling ──────────────────────────
     kwriteconfig6 --file kwinrc --group Tiling \
         --key padding "8" 2>/dev/null || true
-
-    # ── Snap assist: quarter tiling + drag-to-edges ──────────
     kwriteconfig6 --file kwinrc --group Windows \
         --key ElectricBorderMaximize "true" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Windows \
         --key ElectricBorderTiling "true" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Windows \
-        --key ElectricBorders "4" 2>/dev/null || true
-
-    # ── Window snapping zones ────────────────────────────────
-    kwriteconfig6 --file kwinrc --group Windows \
-        --key SnapOnlyWhenOverlapping "false" 2>/dev/null || true
-    kwriteconfig6 --file kwinrc --group Windows \
         --key WindowSnapZone "16" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Windows \
         --key BorderSnapZone "16" 2>/dev/null || true
-
-    # ── Animation speed (snappier feel) ──────────────────────
     kwriteconfig6 --file kdeglobals --group KDE \
         --key AnimationDurationFactor "0.5" 2>/dev/null || true
-
-    # ── Blur + transparency for panels/popups ────────────────
     kwriteconfig6 --file kwinrc --group Effect-blur \
         --key Enabled "true" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Effect-blur \
         --key BlurStrength "6" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Effect-blur \
         --key NoiseStrength "2" 2>/dev/null || true
-
-    # Soft-reload KWin to apply without full restart
     qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
-
-    echo "✔ KDE window rules applied:"
-    echo "  → Rounded corners (radius 12)"
-    echo "  → Window gaps (8px padding)"
-    echo "  → Snap assist (edge tiling, quarter snap)"
-    echo "  → Blur + transparency on panels"
-    echo "  → Animation speed 0.5×"
+    echo "✔ KDE window rules applied (rounded corners, blur, snap, gaps)"
 else
     echo "→ KDE not installed, skipping window rules"
 fi
 
 # ============================================================
-# SDDM login screen — Breeze dark + SkywareOS branding
+# SDDM — Wayland-first
+# FIX: always use Wayland for SDDM greeter (removed NVIDIA X11 fallback
+#      since user explicitly wants Wayland; NVIDIA Wayland support has
+#      improved significantly and works with the open kernel modules)
 # ============================================================
-echo "== Setting up SDDM login screen =="
-
+echo "== Setting up SDDM login screen (Wayland) =="
 sudo pacman -S --noconfirm --needed sddm qt6-declarative kwin plasma-workspace
-
-# ── Use breeze theme as the base (always works, no QML compatibility issues) ──
-# Custom full QML greeter requires matching Qt version between SDDM and theme,
-# which is fragile. Breeze ships with KDE, is always Qt-version-matched, and
-# supports background + logo customisation via theme.conf.
 
 BREEZE_DIR="/usr/share/sddm/themes/breeze"
 sudo mkdir -p "$BREEZE_DIR"
-
-# Copy in the Skyware logo and background
 sudo cp assets/skywareos.svg "$BREEZE_DIR/assets/logo.svg" 2>/dev/null || true
+
 if [ -f assets/skywareos-wallpaper.png ]; then
     sudo cp assets/skywareos-wallpaper.png "$BREEZE_DIR/background.jpg"
 elif command -v convert &>/dev/null && [ -f assets/skywareos.svg ]; then
-    # Generate a dark background with centered logo
     sudo rsvg-convert -w 300 -h 300 assets/skywareos.svg -o /tmp/skyware-logo-300.png 2>/dev/null || true
-    sudo convert -size 1920x1080 xc:#111113         /tmp/skyware-logo-300.png -gravity Center -composite         "$BREEZE_DIR/background.jpg" 2>/dev/null || true
+    sudo convert -size 1920x1080 xc:#111113 \
+        /tmp/skyware-logo-300.png -gravity Center -composite \
+        "$BREEZE_DIR/background.jpg" 2>/dev/null || true
 fi
 
-# Write theme.conf with absolute path — relative paths cause white screen
-sudo tee "$BREEZE_DIR/theme.conf" > /dev/null << THEMEEOF
+sudo tee "$BREEZE_DIR/theme.conf" > /dev/null << 'THEMEEOF'
 [General]
 background=/usr/share/sddm/themes/breeze/background.jpg
 type=image
@@ -3226,76 +2601,41 @@ fontSize=10
 showClock=true
 THEMEEOF
 
-sudo tee "$BREEZE_DIR/theme.conf.user" > /dev/null << THEMEEOF
-[General]
-background=/usr/share/sddm/themes/breeze/background.jpg
-type=image
-color=#111113
-THEMEEOF
-
-# If no background image exists, generate a solid dark one so it's never white
 if [ ! -f "$BREEZE_DIR/background.jpg" ]; then
     if command -v convert &>/dev/null; then
         sudo convert -size 1920x1080 xc:#111113 "$BREEZE_DIR/background.jpg" 2>/dev/null || true
     else
-        # No imagemagick — switch to color mode
         sudo sed -i 's|background=.*||; s/type=image/type=color/' "$BREEZE_DIR/theme.conf"
-        sudo sed -i 's|background=.*||; s/type=image/type=color/' "$BREEZE_DIR/theme.conf.user"
     fi
 fi
 
-# ── Write the SDDM global config ──
 sudo mkdir -p /etc/sddm.conf.d
-# NVIDIA cards cannot run kwin_wayland as the SDDM greeter compositor —
-# the DRM node opens but the compositor freezes or crashes immediately.
-# Use X11 for the greeter on NVIDIA; user can still log into a Wayland session.
-# On non-NVIDIA hardware, use Wayland.
-if echo "$GPU_INFO" | grep -qi "NVIDIA"; then
-    SDDM_DISPLAY_SERVER="x11"
-    SDDM_EXTRA=""
-else
-    SDDM_DISPLAY_SERVER="wayland"
-    SDDM_EXTRA="[Wayland]
-CompositorCommand=kwin_wayland --drm --no-lockscreen --no-global-shortcuts --locale1"
-fi
-
-sudo tee /etc/sddm.conf.d/10-skywareos.conf > /dev/null << SDDMEOF
+sudo tee /etc/sddm.conf.d/10-skywareos.conf > /dev/null << 'SDDMEOF'
 [Theme]
 Current=breeze
 
 [General]
-DisplayServer=${SDDM_DISPLAY_SERVER}
+DisplayServer=wayland
 
-[X11]
-MinimumVT=1
-${SDDM_EXTRA}
+[Wayland]
+CompositorCommand=kwin_wayland --drm --no-lockscreen --no-global-shortcuts --locale1
 SDDMEOF
 
-# Make sure SDDM service is properly enabled (not just the socket)
 sudo systemctl enable sddm
 sudo systemctl disable gdm lightdm 2>/dev/null || true
-
-echo "✔ SDDM configured (breeze theme, ${SDDM_DISPLAY_SERVER} mode)"
-echo "  → To test without rebooting: sudo systemctl restart sddm"
-echo "  → Features: live clock, date, Skyware logo, dark login form, session picker, power buttons"
+echo "✔ SDDM configured (Wayland greeter)"
 
 # ============================================================
-# Timeshift (for ware backup)
+# Timeshift
 # ============================================================
-echo "== Installing Timeshift for ware backup =="
+echo "== Installing Timeshift =="
 sudo pacman -S --noconfirm --needed timeshift
-
-# Auto-configure Timeshift for monthly+weekly snapshots
-# Detect filesystem type
 FS_TYPE=$(df -T / | awk 'NR==2{print $2}')
 if [ "$FS_TYPE" = "btrfs" ]; then
     SNAPSHOT_TYPE="BTRFS"
-    echo "→ btrfs detected — using btrfs snapshots"
 else
     SNAPSHOT_TYPE="RSYNC"
-    echo "→ Using rsync snapshots (ext4/xfs)"
 fi
-
 sudo mkdir -p /etc/timeshift
 sudo tee /etc/timeshift/timeshift.json > /dev/null << TSEOF
 {
@@ -3314,8 +2654,6 @@ sudo tee /etc/timeshift/timeshift.json > /dev/null << TSEOF
   "count_daily": "5",
   "count_hourly": "6",
   "count_boot": "5",
-  "snapshot_size": "",
-  "snapshot_count": "",
   "exclude": [
     "+ /root/**",
     "- /home/**/.thumbnails",
@@ -3325,15 +2663,11 @@ sudo tee /etc/timeshift/timeshift.json > /dev/null << TSEOF
   "exclude-apps": []
 }
 TSEOF
-
-echo "✔ Timeshift configured ($SNAPSHOT_TYPE mode, weekly + monthly schedule)"
-echo "  → ware backup create   — take a snapshot now"
-echo "  → ware backup list     — list snapshots"
-echo "  → ware backup restore  — restore interactively"
+echo "✔ Timeshift configured ($SNAPSHOT_TYPE mode)"
 
 # ============================================================
 # Done
 # ============================================================
 echo ""
-echo "== SkywareOS full setup complete =="
-echo "Log out or reboot required"
+echo "== SkywareOS setup complete =="
+echo "   Reboot required to apply all changes."
