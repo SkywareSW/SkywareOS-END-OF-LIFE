@@ -35,19 +35,16 @@ info()    { echo -e "  ${DIM}→${RESET}  $*"; }
 preflight() {
     phase "Pre-flight checks"
 
-    # Must not run as root directly — use a wheel user + sudo
     if [[ "$EUID" -eq 0 && -z "$SUDO_USER" ]]; then
         fail "Run this script as a regular wheel user: bash skyware-setup.sh"
         exit 1
     fi
 
-    # Ensure we're on an Arch-based system
     if ! command -v pacman &>/dev/null; then
         fail "pacman not found — this script requires an Arch-based distro."
         exit 1
     fi
 
-    # Create log file with correct permissions
     sudo mkdir -p "$(dirname "$LOGFILE")"
     sudo touch "$LOGFILE"
     sudo chmod 666 "$LOGFILE"
@@ -62,12 +59,10 @@ configure_sudo() {
         echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-skyware
         chmod 440 /etc/sudoers.d/10-skyware
     "
-    # Verify syntax before leaving
     sudo visudo -c -f /etc/sudoers.d/10-skyware &>/dev/null \
         && ok "Passwordless sudo configured" \
         || { warn "Sudoers syntax check failed — removing file"; sudo rm /etc/sudoers.d/10-skyware; }
 
-    # Remove requiretty if present
     sudo sed -i '/Defaults.*requiretty/s/^/#/' /etc/sudoers 2>/dev/null || true
 }
 
@@ -75,14 +70,12 @@ configure_sudo() {
 configure_pacman() {
     phase "Configuring pacman"
 
-    # Remove defunct repos
     sudo sed -i \
         -e '/^\[community\]/,/^$/d' \
         -e '/^\[community-testing\]/,/^$/d' \
         -e '/^\[testing\]/,/^$/d' \
         /etc/pacman.conf
 
-    # Enable useful options
     sudo python3 - << 'PYEOF'
 with open("/etc/pacman.conf", "r") as f:
     c = f.read()
@@ -100,19 +93,36 @@ with open("/etc/pacman.conf", "w") as f:
 print("pacman.conf updated")
 PYEOF
 
-    # Enable multilib
     if ! grep -q "^\[multilib\]" /etc/pacman.conf; then
         printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' | sudo tee -a /etc/pacman.conf >/dev/null
         ok "multilib enabled"
     fi
 
-    # Keyring
     sudo pacman-key --init &>/dev/null || true
     sudo pacman-key --populate archlinux &>/dev/null || true
-
-    # Sync
     sudo pacman -Syu --noconfirm --needed 2>&1 | tail -3
     ok "pacman configured (Color, ILoveCandy, 15 parallel downloads, multilib)"
+}
+
+# ── Reflector: mirror management ──────────────────────────────────────────
+configure_reflector() {
+    phase "Reflector mirror management"
+
+    sudo pacman -S --noconfirm --needed reflector
+
+    sudo tee /etc/xdg/reflector/reflector.conf > /dev/null << 'EOF'
+--latest 10
+--sort rate
+--protocol https
+--save /etc/pacman.d/mirrorlist
+EOF
+
+    # Run immediately for a fresh mirrorlist
+    sudo reflector --latest 10 --sort rate --protocol https \
+        --save /etc/pacman.d/mirrorlist 2>&1 | tail -3
+
+    sudo systemctl enable reflector.timer
+    ok "Reflector enabled (weekly mirror refresh)"
 }
 
 # ── AUR helper: paru ─────────────────────────────────────────────────────
@@ -150,13 +160,48 @@ install_base() {
         man-db man-pages \
         2>&1 | tail -5
 
-    # Flatpak remote
     if ! flatpak remote-list 2>/dev/null | grep -q flathub; then
         sudo flatpak remote-add --if-not-exists flathub \
             https://flathub.org/repo/flathub.flatpakrepo
     fi
 
     ok "Base packages installed"
+}
+
+# ── Zram / swap ───────────────────────────────────────────────────────────
+configure_zram() {
+    phase "Zram swap"
+
+    sudo pacman -S --noconfirm --needed systemd  # zram-generator ships with systemd
+
+    sudo mkdir -p /etc/systemd/zram-generator.conf.d
+    sudo tee /etc/systemd/zram-generator.conf > /dev/null << 'EOF'
+[zram0]
+zram-size = min(ram / 2, 8192)
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+EOF
+
+    # Disable any existing traditional swap to avoid conflicts
+    sudo swapoff -a 2>/dev/null || true
+
+    sudo systemctl daemon-reload
+    sudo systemctl start systemd-zram-setup@zram0.service 2>/dev/null || \
+        warn "zram device not started — will activate on next boot"
+
+    # Set vm.swappiness to a sane value for zram
+    if ! grep -q "vm.swappiness" /etc/sysctl.d/99-skyware.conf 2>/dev/null; then
+        sudo tee /etc/sysctl.d/99-skyware.conf > /dev/null << 'EOF'
+vm.swappiness = 180
+vm.watermark_boost_factor = 0
+vm.watermark_scale_factor = 125
+vm.page-cluster = 0
+EOF
+        sudo sysctl --system &>/dev/null || true
+    fi
+
+    ok "Zram swap configured (zstd, up to min(RAM/2, 8 GiB))"
 }
 
 # ── GPU driver detection ─────────────────────────────────────────────────
@@ -169,38 +214,26 @@ install_gpu_drivers() {
     if echo "$gpu_info" | grep -qi "NVIDIA"; then
         info "NVIDIA GPU detected"
 
-        # Determine generation
         if echo "$gpu_info" | grep -qiE "RTX [2-9][0-9]{3}|RTX [0-9]{4}|GTX 16[0-9]{2}"; then
-            # Turing+ → open kernel modules
             sudo pacman -S --noconfirm --needed nvidia-open nvidia-utils nvidia-settings libva-nvidia-driver
             ok "NVIDIA open kernel modules installed (Turing+)"
-
         elif echo "$gpu_info" | grep -qiE "GTX (10|9[0-9]|8[0-9]|7[5-9])[0-9]{2}"; then
-            # Maxwell/Pascal → legacy 470xx
             ensure_paru
             paru -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils 2>/dev/null \
                 && ok "NVIDIA 470xx legacy drivers installed (Maxwell/Pascal)" \
                 || warn "Could not install nvidia-470xx — install manually"
-
         elif echo "$gpu_info" | grep -qiE "GTX [67][0-9]{2}"; then
-            # Kepler → 390xx
             ensure_paru
             paru -S --noconfirm nvidia-390xx-dkms nvidia-390xx-utils 2>/dev/null \
                 && ok "NVIDIA 390xx legacy drivers installed (Kepler)" \
                 || warn "Could not install nvidia-390xx — install manually"
-
         else
-            # Unknown NVIDIA — try open first
             sudo pacman -S --noconfirm --needed nvidia-open nvidia-utils nvidia-settings 2>/dev/null \
                 || sudo pacman -S --noconfirm --needed nvidia-dkms nvidia-utils nvidia-settings
             ok "NVIDIA drivers installed (unknown gen, tried open)"
         fi
 
-        # Enable DRM modesetting for Wayland
-        if [[ -f /etc/default/grub ]]; then
-            sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="nvidia-drm.modeset=1 /' \
-                /etc/default/grub 2>/dev/null || true
-        fi
+        _patch_bootloader_nvidia
 
     elif echo "$gpu_info" | grep -qi "AMD"; then
         sudo pacman -S --noconfirm --needed xf86-video-amdgpu mesa vulkan-radeon \
@@ -222,15 +255,116 @@ install_gpu_drivers() {
         sudo pacman -S --noconfirm --needed mesa vulkan-swrast
     fi
 
-    # Common Vulkan + VA-API
     sudo pacman -S --noconfirm --needed vulkan-icd-loader lib32-vulkan-icd-loader 2>/dev/null || true
+}
+
+# Inject nvidia-drm.modeset=1 into whichever bootloader is present
+_patch_bootloader_nvidia() {
+    local param="nvidia-drm.modeset=1"
+
+    # ── GRUB ──────────────────────────────────────────────────────────────
+    if [[ -f /etc/default/grub ]]; then
+        if ! grep -q "$param" /etc/default/grub; then
+            sudo sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"/GRUB_CMDLINE_LINUX_DEFAULT=\"${param} /" \
+                /etc/default/grub
+            _regen_grub
+            ok "GRUB: nvidia-drm.modeset=1 injected"
+        else
+            info "GRUB: nvidia-drm.modeset=1 already present"
+        fi
+    fi
+
+    # ── Limine ────────────────────────────────────────────────────────────
+    local conf
+    conf=$(_find_limine_conf)
+    if [[ -n "$conf" ]]; then
+        if ! grep -q "$param" "$conf"; then
+            sudo sed -i -E "/^[[:space:]]*cmdline/{ /$param/! s/$/ $param/ }" "$conf"
+            ok "Limine: nvidia-drm.modeset=1 injected"
+        else
+            info "Limine: nvidia-drm.modeset=1 already present"
+        fi
+    fi
+
+    # ── systemd-boot ──────────────────────────────────────────────────────
+    local entries_dir=""
+    for d in /boot/loader/entries /efi/loader/entries; do
+        [[ -d "$d" ]] && { entries_dir="$d"; break; }
+    done
+    if [[ -n "$entries_dir" ]]; then
+        for entry in "$entries_dir"/*.conf; do
+            [[ -f "$entry" ]] || continue
+            if grep -q "^options" "$entry" && ! grep -q "$param" "$entry"; then
+                sudo sed -i "s/^options.*/& ${param}/" "$entry"
+                ok "systemd-boot: nvidia-drm.modeset=1 injected in $(basename "$entry")"
+            fi
+        done
+    fi
+}
+
+# ── GRUB support ─────────────────────────────────────────────────────────
+configure_grub() {
+    phase "GRUB bootloader branding"
+
+    if [[ ! -f /etc/default/grub ]]; then
+        info "GRUB not detected — skipping"
+        return
+    fi
+
+    sudo pacman -S --noconfirm --needed grub
+
+    # Brand the menu entry names
+    sudo sed -i -E \
+        's/^(GRUB_DISTRIBUTOR=).*/\1"SkywareOS"/' \
+        /etc/default/grub
+
+    # Ensure quiet splash apparmor params are present
+    local extra="quiet splash apparmor=1 security=apparmor"
+    if ! grep -q "quiet" /etc/default/grub; then
+        sudo sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"/GRUB_CMDLINE_LINUX_DEFAULT=\"${extra} /" \
+            /etc/default/grub
+    fi
+
+    # GRUB theme: simple dark background via grub-theme-void or plain color
+    sudo sed -i -E \
+        's/^#?(GRUB_BACKGROUND=).*/\1""/' \
+        /etc/default/grub 2>/dev/null || true
+
+    # If we have the SVG asset, generate a boot background
+    if [[ -f "$ASSETS_DIR/skywareos.svg" ]] && command -v convert &>/dev/null; then
+        sudo convert -size 1920x1080 xc:#111113 \
+            "$ASSETS_DIR/skywareos.svg" -gravity Center \
+            -resize 300x300 -composite \
+            /boot/grub/skywareos-bg.png 2>/dev/null || true
+        sudo sed -i -E \
+            's|^#?(GRUB_BACKGROUND=).*|\1"/boot/grub/skywareos-bg.png"|' \
+            /etc/default/grub 2>/dev/null || true
+    fi
+
+    _regen_grub
+    ok "GRUB configured (SkywareOS branding)"
+}
+
+_regen_grub() {
+    # Detect install location and regenerate
+    if [[ -f /boot/grub/grub.cfg ]]; then
+        sudo grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tail -5
+        ok "GRUB config regenerated → /boot/grub/grub.cfg"
+    elif [[ -f /efi/grub/grub.cfg ]]; then
+        sudo grub-mkconfig -o /efi/grub/grub.cfg 2>&1 | tail -5
+        ok "GRUB config regenerated → /efi/grub/grub.cfg"
+    elif [[ -f /boot/efi/grub/grub.cfg ]]; then
+        sudo grub-mkconfig -o /boot/efi/grub/grub.cfg 2>&1 | tail -5
+        ok "GRUB config regenerated → /boot/efi/grub/grub.cfg"
+    else
+        warn "Could not locate grub.cfg — run: sudo grub-mkconfig -o /boot/grub/grub.cfg"
+    fi
 }
 
 # ── Desktop environment selection ────────────────────────────────────────
 install_desktop() {
     phase "Desktop environment"
 
-    # Check if a DE/greeter is already running
     local already=false
     for svc in sddm gdm lightdm; do
         systemctl is-enabled "$svc" &>/dev/null && already=true && break
@@ -373,7 +507,6 @@ GreeterEnvironment=QT_WAYLAND_SHELL_INTEGRATION=layer-shell
 CompositorCommand=kwin_wayland --drm --no-lockscreen --no-global-shortcuts --locale1
 EOF
 
-    # Build breeze background from logo if assets available
     local breeze_dir="/usr/share/sddm/themes/breeze"
     sudo mkdir -p "$breeze_dir/assets"
 
@@ -412,7 +545,6 @@ configure_plymouth() {
     local theme_dir="/usr/share/plymouth/themes/skywareos"
     sudo mkdir -p "$theme_dir"
 
-    # Generate logo images
     if [[ -f "$ASSETS_DIR/skywareos.svg" ]]; then
         sudo rsvg-convert -w 512 -h 512 "$ASSETS_DIR/skywareos.svg" -o "$theme_dir/logo.png" 2>/dev/null || true
         sudo rsvg-convert -w 128 -h 128 "$ASSETS_DIR/skywareos.svg" -o "$theme_dir/logo-small.png" 2>/dev/null || true
@@ -477,7 +609,6 @@ fun quit_callback() {
 Plymouth.SetQuitFunction(quit_callback);
 EOF
 
-    # Inject plymouth hook into mkinitcpio
     if grep -q "^HOOKS=" /etc/mkinitcpio.conf; then
         if ! grep -q "plymouth" /etc/mkinitcpio.conf; then
             sudo sed -i '/^HOOKS=/ s/udev/udev plymouth/' /etc/mkinitcpio.conf
@@ -487,6 +618,10 @@ EOF
 
     sudo mkinitcpio -P 2>&1 | tail -3
     sudo plymouth-set-default-theme -R skywareos
+
+    # Regenerate GRUB after mkinitcpio so the new initrd is picked up
+    _regen_grub
+
     ok "Plymouth theme set: skywareos"
 }
 
@@ -494,18 +629,8 @@ EOF
 configure_limine() {
     phase "Limine bootloader branding"
 
-    local conf=""
-    for candidate in \
-        /boot/limine.conf \
-        /efi/limine.conf \
-        /boot/efi/limine.conf; do
-        [[ -f "$candidate" ]] && { conf="$candidate"; break; }
-    done
-
-    # Wider search if not found in canonical paths
-    if [[ -z "$conf" ]]; then
-        conf=$(find /boot /efi /boot/efi -maxdepth 5 -iname "limine.conf" 2>/dev/null | head -1 || true)
-    fi
+    local conf
+    conf=$(_find_limine_conf)
 
     if [[ -z "$conf" ]]; then
         warn "Limine config not found — skipping bootloader branding"
@@ -516,9 +641,23 @@ configure_limine() {
     sudo cp "$conf" "$conf.bak"
 
     sudo sed -i -E 's/^([[:space:]]*label[[:space:]]*=[[:space:]]*).*/\1SkywareOS/' "$conf"
-    sudo sed -i -E '/^[[:space:]]*cmdline/{ /quiet/! s/$/ quiet splash apparmor=1 security=apparmor nvidia-drm.modeset=1/ }' "$conf"
+    sudo sed -i -E '/^[[:space:]]*cmdline/{ /quiet/! s/$/ quiet splash apparmor=1 security=apparmor/ }' "$conf"
 
     ok "Limine entries branded to SkywareOS"
+}
+
+_find_limine_conf() {
+    local conf=""
+    for candidate in \
+        /boot/limine.conf \
+        /efi/limine.conf \
+        /boot/efi/limine.conf; do
+        [[ -f "$candidate" ]] && { conf="$candidate"; break; }
+    done
+    if [[ -z "$conf" ]]; then
+        conf=$(find /boot /efi /boot/efi -maxdepth 5 -iname "limine.conf" 2>/dev/null | head -1 || true)
+    fi
+    echo "$conf"
 }
 
 # ── Fastfetch configuration ───────────────────────────────────────────────
@@ -586,7 +725,6 @@ EOF
     echo "$release_content" | sudo tee /etc/os-release > /dev/null
     echo "$release_content" | sudo tee /usr/lib/os-release > /dev/null
 
-    # Machine info
     sudo hostnamectl set-hostname "skywareos" 2>/dev/null || true
     ok "OS release branded to SkywareOS Maroon 2.0"
 }
@@ -599,11 +737,9 @@ configure_shell() {
         zsh zsh-autosuggestions zsh-syntax-highlighting \
         fzf zoxide eza bat fd ripgrep
 
-    # Change shell for original user
     sudo chsh -s /bin/zsh "$ORIGINAL_USER" 2>/dev/null || \
         sudo usermod -s /bin/zsh "$ORIGINAL_USER" || true
 
-    # Install Starship as user (no root)
     if ! command -v starship &>/dev/null; then
         sudo -u "$ORIGINAL_USER" bash -c \
             'curl -sS https://starship.rs/install.sh | sh -s -- -y' 2>&1 | tail -3
@@ -881,16 +1017,13 @@ setw -g window-status-current-format "#[bg=#2a2a2f,fg=#c8c8dc,bold] #I:#W #[defa
 setw -g window-status-format         "#[fg=#4a4a58] #I:#W "
 setw -g window-status-separator      " "
 
-# Pane borders
 set -g pane-border-style        "fg=#2a2a2f"
 set -g pane-active-border-style "fg=#a0a0b0"
 
-# Splits
 bind | split-window -h -c "#{pane_current_path}"
 bind - split-window -v -c "#{pane_current_path}"
 unbind '"'; unbind '%'
 
-# Navigation (vim-style)
 bind h select-pane -L
 bind j select-pane -D
 bind k select-pane -U
@@ -903,7 +1036,6 @@ bind -r L resize-pane -R 5
 bind r source-file ~/.tmux.conf \; display "Config reloaded ✔"
 bind N new-window -c "#{pane_current_path}"
 
-# Copy mode (vi)
 setw -g mode-keys vi
 bind -T copy-mode-vi v   send -X begin-selection
 bind -T copy-mode-vi y   send -X copy-selection-and-cancel
@@ -933,7 +1065,6 @@ install_flatpak_apps() {
 configure_security() {
     phase "Security hardening"
 
-    # Firewall
     sudo pacman -S --noconfirm --needed ufw fail2ban
     sudo systemctl enable --now ufw
     sudo ufw --force enable
@@ -943,12 +1074,10 @@ configure_security() {
     sudo systemctl enable fail2ban
     ok "UFW firewall enabled (deny in, allow out)"
 
-    # AppArmor
     sudo pacman -S --noconfirm --needed apparmor
     sudo systemctl enable apparmor
     ok "AppArmor enabled"
 
-    # SSH hardening
     sudo pacman -S --noconfirm --needed openssh
     sudo mkdir -p /etc/ssh/sshd_config.d
     sudo tee /etc/ssh/sshd_config.d/99-skywareos.conf > /dev/null << 'EOF'
@@ -967,14 +1096,12 @@ EOF
     sudo systemctl enable sshd
     ok "SSH hardened"
 
-    # USBGuard
     sudo pacman -S --noconfirm --needed usbguard
     sudo usbguard generate-policy 2>/dev/null | sudo tee /etc/usbguard/rules.conf >/dev/null || true
     sudo systemctl enable usbguard
     sudo systemctl start usbguard 2>/dev/null || true
     ok "USBGuard enabled"
 
-    # Polkit rule for wheel group
     sudo mkdir -p /etc/polkit-1/rules.d
     sudo tee /etc/polkit-1/rules.d/10-skyware.rules > /dev/null << 'EOF'
 polkit.addRule(function(action, subject) {
@@ -985,7 +1112,6 @@ polkit.addRule(function(action, subject) {
 EOF
     ok "Polkit rule configured for wheel group"
 
-    # Automatic security updates (weekly)
     sudo tee /etc/systemd/system/skyware-security-update.service > /dev/null << 'EOF'
 [Unit]
 Description=SkywareOS Automatic Security Update
@@ -1014,7 +1140,6 @@ EOF
     sudo systemctl enable skyware-security-update.timer
     ok "Weekly auto-update timer enabled"
 
-    # Pacman keyring hook
     sudo mkdir -p /etc/pacman.d/hooks
     sudo tee /etc/pacman.d/hooks/keyring-refresh.hook > /dev/null << 'EOF'
 [Trigger]
@@ -1038,7 +1163,6 @@ configure_kde() {
 
     phase "KDE Plasma configuration"
 
-    # Install logo SVG
     if [[ -f "$ASSETS_DIR/skywareos.svg" ]]; then
         sudo cp "$ASSETS_DIR/skywareos.svg" /usr/share/icons/hicolor/scalable/apps/skywareos.svg
         sudo cp "$ASSETS_DIR/skywareos.svg" /usr/share/icons/hicolor/scalable/apps/skywareos-start.svg
@@ -1046,7 +1170,6 @@ configure_kde() {
         sudo kbuildsycoca6 --noincremental 2>/dev/null || true
     fi
 
-    # Color scheme
     mkdir -p "$ORIGINAL_HOME/.local/share/color-schemes"
     cat > "$ORIGINAL_HOME/.local/share/color-schemes/SkywareOS.colors" << 'EOF'
 [ColorEffects:Disabled]
@@ -1150,20 +1273,16 @@ inactiveBlend=14,14,16
 inactiveForeground=74,74,88
 EOF
 
-    # KDE settings
-    kwriteconfig6 --file kdeglobals   --group General       --key ColorScheme     "SkywareOS"   2>/dev/null || true
+    kwriteconfig6 --file kdeglobals   --group General       --key ColorScheme     "SkywareOS"      2>/dev/null || true
     kwriteconfig6 --file kwinrc       --group org.kde.kdecoration2 --key theme    "org.kde.breeze" 2>/dev/null || true
-    kwriteconfig6 --file kdeglobals   --group KDE           --key widgetStyle     "Breeze"      2>/dev/null || true
-    kwriteconfig6 --file plasmarc     --group Theme         --key name            "breeze-dark" 2>/dev/null || true
-    kwriteconfig6 --file kdeglobals   --group KDE           --key AnimationDurationFactor "0.5" 2>/dev/null || true
-    # Compositing
+    kwriteconfig6 --file kdeglobals   --group KDE           --key widgetStyle     "Breeze"         2>/dev/null || true
+    kwriteconfig6 --file plasmarc     --group Theme         --key name            "breeze-dark"    2>/dev/null || true
+    kwriteconfig6 --file kdeglobals   --group KDE           --key AnimationDurationFactor "0.5"    2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Compositing --key Backend  "OpenGL" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Compositing --key Enabled  "true"   2>/dev/null || true
-    # Blur
     kwriteconfig6 --file kwinrc --group Effect-blur --key Enabled       "true" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Effect-blur --key BlurStrength   "6"   2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Effect-blur --key NoiseStrength  "2"   2>/dev/null || true
-    # Window snapping
     kwriteconfig6 --file kwinrc --group Windows --key ElectricBorderMaximize "true" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Windows --key ElectricBorderTiling   "true" 2>/dev/null || true
     kwriteconfig6 --file kwinrc --group Windows --key WindowSnapZone         "16"   2>/dev/null || true
@@ -1203,8 +1322,6 @@ configure_cursor() {
 # ── MOTD ──────────────────────────────────────────────────────────────────
 configure_motd() {
     phase "MOTD"
-
-    sudo pacman -S --noconfirm --needed figlet 2>/dev/null || true
 
     sudo tee /etc/profile.d/skyware-motd.sh > /dev/null << 'MOTDEOF'
 #!/bin/bash
@@ -1295,7 +1412,6 @@ configure_gestures() {
     sudo gpasswd -a "$ORIGINAL_USER" input
 
     cat > "$ORIGINAL_HOME/.config/libinput-gestures.conf" << 'EOF'
-# SkywareOS gesture config (Wayland via KWin D-Bus)
 gesture swipe left  3  qdbus6 org.kde.KWin /KWin nextDesktop
 gesture swipe right 3  qdbus6 org.kde.KWin /KWin previousDesktop
 gesture swipe up    3  qdbus6 org.kde.KWin /KWin toggleOverview
@@ -1450,7 +1566,6 @@ time_format=%H:%M
 toggle_hud=Shift_F12
 EOF
 
-    # Wine (wow64)
     sudo pacman -S --noconfirm --needed \
         wine wine-mono wine-gecko winetricks \
         lib32-vulkan-icd-loader vulkan-icd-loader \
@@ -1494,6 +1609,15 @@ EOF
 # ── Fingerprint reader ────────────────────────────────────────────────────
 configure_fingerprint() {
     phase "Fingerprint reader (fprint)"
+
+    # Check if any fingerprint hardware is actually present before touching PAM
+    if ! lsusb 2>/dev/null | grep -qiE "fingerprint|validity|elan|goodix|synaptics" && \
+       ! lspci 2>/dev/null | grep -qi "fingerprint"; then
+        info "No fingerprint hardware detected — skipping PAM integration"
+        info "Install fprintd manually and enroll with: fprintd-enroll"
+        return
+    fi
+
     sudo pacman -S --noconfirm --needed fprintd libfprint
 
     for pam_file in /etc/pam.d/sudo /etc/pam.d/login /etc/pam.d/sddm; do
@@ -1511,7 +1635,12 @@ configure_fingerprint() {
 configure_multimonitor() {
     phase "Multi-monitor support"
     sudo pacman -S --noconfirm --needed autorandr xorg-xrandr
-    autorandr --save skyware-default 2>/dev/null || true
+    # Only save a profile if a display is actually connected and X is running
+    if [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+        autorandr --save skyware-default 2>/dev/null || true
+    else
+        info "No display session detected — autorandr profile will be saved on first login"
+    fi
     sudo pacman -S --noconfirm --needed kscreen 2>/dev/null || true
     ok "Multi-monitor: KScreen (Wayland) + autorandr (X11)"
 }
@@ -1579,7 +1708,7 @@ configure_dotfiles() {
     done
     $dc commit -m "SkywareOS initial dotfiles" 2>/dev/null || true
 
-    # Systemd user timer for daily backup
+    local uid; uid=$(id -u "$ORIGINAL_USER")
     mkdir -p "$ORIGINAL_HOME/.config/systemd/user"
     cat > "$ORIGINAL_HOME/.config/systemd/user/dotfiles-backup.service" << SVCEOF
 [Unit]
@@ -1602,7 +1731,10 @@ Persistent=true
 WantedBy=default.target
 EOF
 
-    sudo -u "$ORIGINAL_USER" systemctl --user enable dotfiles-backup.timer 2>/dev/null || true
+    local uid; uid=$(id -u "$ORIGINAL_USER")
+    XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        sudo -u "$ORIGINAL_USER" systemctl --user enable dotfiles-backup.timer 2>/dev/null || true
+
     chown -R "$ORIGINAL_USER:$ORIGINAL_USER" \
         "$dot_dir" \
         "$ORIGINAL_HOME/.config/systemd" 2>/dev/null || true
@@ -1630,12 +1762,10 @@ ok()   { echo -e "  ${GREEN}✔${RESET}  $*"; }
 fail() { echo -e "  ${RED}✖${RESET}  $*"; }
 warn() { echo -e "  ${YELLOW}⚠${RESET}  $*"; }
 
-# ── Bootstrap passwordless sudo if needed ────────────────────────────────
 if [[ ! -f /etc/sudoers.d/10-skyware ]]; then
     sudo bash -c "echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-skyware && chmod 440 /etc/sudoers.d/10-skyware" 2>/dev/null || true
 fi
 
-# ── Spinner ──────────────────────────────────────────────────────────────
 spinner() {
     local pid=$! spin='-\|/' i=0
     while kill -0 "$pid" 2>/dev/null; do
@@ -1645,7 +1775,6 @@ spinner() {
     printf "\r"
 }
 
-# ── AUR helper ───────────────────────────────────────────────────────────
 have_paru() { command -v paru >/dev/null 2>&1; }
 ensure_paru() {
     have_paru && return
@@ -1658,7 +1787,6 @@ ensure_paru() {
     info "paru installed"
 }
 
-# ── Package install (pacman → flatpak → AUR) ─────────────────────────────
 install_pkg() {
     for pkg in "$@"; do
         echo -e "  ${DIM}→${RESET}  Installing: ${BOLD}$pkg${RESET}"
@@ -1681,7 +1809,6 @@ install_pkg() {
     done
 }
 
-# ── Package remove ────────────────────────────────────────────────────────
 remove_pkg() {
     for pkg in "$@"; do
         if pacman -Q "$pkg" &>/dev/null; then
@@ -1696,23 +1823,18 @@ remove_pkg() {
     done
 }
 
-# ── Doctor ────────────────────────────────────────────────────────────────
 doctor() {
     echo -e "\n${CYAN}${BOLD}── SkywareOS Doctor ─────────────────────────────${RESET}"
-    # Pacman DB
     echo -e "${DIM}→ Package database integrity...${RESET}"
     sudo pacman -Dk 2>&1 | grep -v "^$" | head -10 || true
-    # Flatpak
     echo -e "${DIM}→ Flatpak integrity...${RESET}"
     flatpak repair --dry-run 2>&1 | tail -5 || true
-    # Firewall
     echo -e "${DIM}→ Firewall...${RESET}"
     if command -v ufw &>/dev/null && systemctl is-active ufw &>/dev/null; then
         ok "Firewall (ufw) is ACTIVE"
     else
         fail "Firewall (ufw) is NOT active"
     fi
-    # Failed units
     echo -e "${DIM}→ Failed systemd units...${RESET}"
     local failed; failed=$(systemctl --failed --no-legend 2>/dev/null | awk '{print $1}')
     if [[ -n "$failed" ]]; then
@@ -1720,7 +1842,6 @@ doctor() {
     else
         ok "No failed units"
     fi
-    # Disk health (if smartctl available)
     if command -v smartctl &>/dev/null; then
         echo -e "${DIM}→ Disk health (first drive)...${RESET}"
         local drive; drive=$(lsblk -nd -o NAME,TYPE | awk '$2=="disk"{print $1}' | head -1)
@@ -1730,13 +1851,13 @@ doctor() {
     echo -e "${GREEN}${BOLD}── Diagnostics complete ─────────────────────────${RESET}\n"
 }
 
-# ── System status ─────────────────────────────────────────────────────────
 ware_status() {
     echo -e "\n${CYAN}${BOLD}── SkywareOS Status ─────────────────────────────${RESET}"
     echo -e "${DIM}Kernel:   ${RESET}$(uname -r)"
     echo -e "${DIM}Uptime:   ${RESET}$(uptime -p | sed 's/up //')"
     echo -e "${DIM}Memory:   ${RESET}$(free -h | awk '/Mem:/{print $3"/"$2}')"
     echo -e "${DIM}Disk:     ${RESET}$(df -h / | awk 'NR==2{print $3"/"$2" ("$5")"}')"
+    echo -e "${DIM}Swap:     ${RESET}$(swapon --show=SIZE,USED,TYPE --noheadings 2>/dev/null | head -1 || echo 'none')"
     echo -e "${DIM}Desktop:  ${RESET}${XDG_CURRENT_DESKTOP:-—}"
     echo -e "${DIM}Session:  ${RESET}${XDG_SESSION_TYPE:-—}"
     echo -e "${DIM}Channel:  ${RESET}Maroon"
@@ -1748,7 +1869,6 @@ ware_status() {
     echo ""
 }
 
-# ── Power profiles ────────────────────────────────────────────────────────
 power_profile() {
     case "$1" in
         balanced)
@@ -1771,7 +1891,6 @@ power_profile() {
     esac
 }
 
-# ── Display manager ───────────────────────────────────────────────────────
 display_manager() {
     case "$1" in
         list)   printf "  sddm\n  gdm\n  lightdm\n" ;;
@@ -1785,7 +1904,6 @@ display_manager() {
     esac
 }
 
-# ── Mirror sync ───────────────────────────────────────────────────────────
 sync_mirrors() {
     echo -e "  ${DIM}→${RESET}  Syncing mirrors with reflector..."
     sudo pacman -S --noconfirm reflector &>/dev/null
@@ -1795,11 +1913,9 @@ sync_mirrors() {
     info "Mirrors synced"
 }
 
-# ── Benchmark ─────────────────────────────────────────────────────────────
 benchmark() {
     echo -e "\n${CYAN}${BOLD}── SkywareOS Benchmark ──────────────────────────${RESET}"
     echo ""
-    # CPU
     local cpu_model; cpu_model=$(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)
     local cpu_cores; cpu_cores=$(nproc)
     echo -e "${BOLD}CPU${RESET}  $cpu_model  (${cpu_cores} cores)"
@@ -1814,7 +1930,6 @@ while time.time() - start < 5:
 print(count)
 ")
     echo -e "${GREEN}${cpu_score}${RESET} ops/5s"
-    # Memory bandwidth
     echo ""
     echo -e "${BOLD}Memory${RESET}  $(free -h | awk '/Mem:/{print $2}') total"
     echo -ne "        ${DIM}Running bandwidth test...${RESET} "
@@ -1828,7 +1943,6 @@ elapsed = time.time() - start
 print(f'{size/1e9/elapsed:.1f} GB/s')
 ")
     echo -e "${GREEN}${mem_bw}${RESET}"
-    # Disk
     echo ""
     echo -e "${BOLD}Disk${RESET}  $(df -h / | awk 'NR==2{print $1}')"
     echo -ne "       ${DIM}Sequential write (512MB)...${RESET} "
@@ -1845,7 +1959,6 @@ print(f'{size/1e9/elapsed:.1f} GB/s')
     info "benchmark run"
 }
 
-# ── Repair ────────────────────────────────────────────────────────────────
 repair() {
     echo -e "\n${CYAN}${BOLD}── SkywareOS Repair ─────────────────────────────${RESET}"
     echo -e "${DIM}[1/7]${RESET} Fixing pacman keyring..."
@@ -1892,7 +2005,6 @@ repair() {
     info "repair run"
 }
 
-# ── Backup (Timeshift + restic) ───────────────────────────────────────────
 backup_cmd() {
     case "$2" in
         create)
@@ -1904,7 +2016,6 @@ backup_cmd() {
         list)    sudo timeshift --list 2>/dev/null || fail "Timeshift not installed" ;;
         restore) sudo timeshift --restore 2>/dev/null || fail "Timeshift not installed" ;;
         delete)  sudo timeshift --delete 2>/dev/null || fail "Timeshift not installed" ;;
-        # restic integration
         restic-init)
             command -v restic &>/dev/null || sudo pacman -S --noconfirm restic
             [[ -z "$RESTIC_REPOSITORY" ]] && { fail "Set RESTIC_REPOSITORY env var first"; return; }
@@ -1919,7 +2030,6 @@ backup_cmd() {
     esac
 }
 
-# ── Disk health ───────────────────────────────────────────────────────────
 disk_health() {
     echo -e "\n${CYAN}${BOLD}── Disk Health ──────────────────────────────────${RESET}"
     if ! command -v smartctl &>/dev/null; then
@@ -1935,7 +2045,6 @@ disk_health() {
     echo ""
 }
 
-# ── Flatpak permissions manager ───────────────────────────────────────────
 flatpak_perms() {
     case "$2" in
         list) flatpak permissions 2>/dev/null | head -40 || flatpak list ;;
@@ -1946,41 +2055,6 @@ flatpak_perms() {
     esac
 }
 
-# ── AI subcommand ─────────────────────────────────────────────────────────
-ai_cmd() {
-    case "$2" in
-        doctor)  exec /usr/local/bin/ware-ai-doctor ;;
-        ask)
-            shift 2
-            local query="$*"
-            [[ -z "$query" ]] && { fail "Provide a question"; return; }
-            local KEY_FILE="$HOME/.config/skyware/api_key"
-            local API_KEY="${ANTHROPIC_API_KEY:-}"
-            [[ -z "$API_KEY" && -f "$KEY_FILE" ]] && API_KEY=$(cat "$KEY_FILE")
-            if [[ -z "$API_KEY" ]]; then
-                fail "No API key. Set ANTHROPIC_API_KEY or write to ~/.config/skyware/api_key"
-                return
-            fi
-            echo -e "  ${DIM}→${RESET}  Asking Claude: $query"
-            local resp; resp=$(curl -s https://api.anthropic.com/v1/messages \
-                -H "x-api-key: $API_KEY" \
-                -H "anthropic-version: 2023-06-01" \
-                -H "content-type: application/json" \
-                -d "$(jq -nc --arg q "$query" '{"model":"claude-sonnet-4-20260514","max_tokens":512,"messages":[{"role":"user","content":$q}]}')" 2>/dev/null)
-            echo "$resp" | python3 -c "
-import json, sys
-try:
-    print(json.load(sys.stdin)['content'][0]['text'])
-except:
-    print('API error — check your key')
-" ;;
-        *)
-            echo -e "  ware ai doctor   - Run AI system diagnosis"
-            echo -e "  ware ai ask <q>  - Ask Claude a question" ;;
-    esac
-}
-
-# ── Setup environments ────────────────────────────────────────────────────
 setup_env() {
     case "$2" in
         hyprland)
@@ -2013,7 +2087,6 @@ setup_env() {
     esac
 }
 
-# ── Encryption helper (LUKS) ──────────────────────────────────────────────
 luks_cmd() {
     case "$2" in
         list)
@@ -2035,7 +2108,6 @@ luks_cmd() {
     esac
 }
 
-# ── Network wizard ────────────────────────────────────────────────────────
 network_cmd() {
     case "$2" in
         list)
@@ -2074,15 +2146,12 @@ network_cmd() {
     esac
 }
 
-# ── Help ──────────────────────────────────────────────────────────────────
 show_help() {
     echo -e "\n${BOLD}${CYAN}ware${RESET} — SkywareOS Package Manager v2.0\n"
     echo -e "${BOLD}Package Management${RESET}"
     echo -e "  install <pkg>        Install package (pacman → flatpak → AUR)"
     echo -e "  remove  <pkg>        Remove package"
     echo -e "  update               Update all packages + flatpaks"
-    echo -e "  upgrade              Upgrade SkywareOS to latest"
-    echo -e "  switch               Switch to testing channel"
     echo -e "  search  <pkg>        Search packages"
     echo -e "  info    <pkg>        Package info"
     echo -e "  list                 List installed packages"
@@ -2101,9 +2170,6 @@ show_help() {
     echo -e "\n${BOLD}Backup & Security${RESET}"
     echo -e "  backup <action>      Snapshots (create/list/restore/delete/restic-init/restic-backup)"
     echo -e "  luks <action>        LUKS encryption helpers (list/open/close)"
-    echo -e "\n${BOLD}AI${RESET}"
-    echo -e "  ai doctor            AI-powered system diagnosis"
-    echo -e "  ai ask <question>    Ask Claude a question"
     echo -e "\n${BOLD}Networking${RESET}"
     echo -e "  network <action>     Network tools (list/wifi/speed/dns)"
     echo -e "\n${BOLD}Environments & Tools${RESET}"
@@ -2117,7 +2183,6 @@ show_help() {
     echo ""
 }
 
-# ── Main dispatcher ───────────────────────────────────────────────────────
 case "$1" in
     install)   shift; install_pkg "$@" ;;
     remove)    shift; remove_pkg "$@" ;;
@@ -2139,20 +2204,12 @@ case "$1" in
     dm)        display_manager "$@" ;;
     backup)    backup_cmd "$@" ;;
     luks)      luks_cmd "$@" ;;
-    ai)        ai_cmd "$@" ;;
     network)   network_cmd "$@" ;;
     setup)     setup_env "$@" ;;
     flatpak)   flatpak_perms "$@" ;;
     settings)  exec skyware-settings ;;
     git)       command -v xdg-open &>/dev/null && xdg-open "https://skywaresw.github.io/SkywareOS" || echo "https://skywaresw.github.io/SkywareOS" ;;
     dualboot)  paru -S --noconfirm limine-entry-tool && sudo limine-entry-tool --scan ;;
-    upgrade)
-        rm -rf /tmp/SkywareOS 2>/dev/null || true
-        git clone https://github.com/SkywareSW/SkywareOS /tmp/SkywareOS
-        cd /tmp/SkywareOS
-        sed -i 's/\r$//' skyware-setup.sh
-        chmod +x skyware-setup.sh
-        bash skyware-setup.sh ;;
     switch)
         rm -rf /tmp/SkywareOS-Testing 2>/dev/null || true
         git clone https://github.com/SkywareSW/SkywareOS-Testing /tmp/SkywareOS-Testing
@@ -2174,80 +2231,7 @@ WAREEOF
     ok "ware v2.0 installed"
 }
 
-# ── AI Doctor ─────────────────────────────────────────────────────────────
-install_ai_doctor() {
-    phase "AI Doctor"
-
-    sudo tee /usr/local/bin/ware-ai-doctor > /dev/null << 'EOF'
-#!/usr/bin/env bash
-# ware-ai-doctor — AI-powered system diagnosis via Claude API
-
-RED="\e[31m"; CYAN="\e[36m"; GREEN="\e[32m"; YELLOW="\e[33m"; RESET="\e[0m"; BOLD="\e[1m"
-
-KEY_FILE="$HOME/.config/skyware/api_key"
-API_KEY="${ANTHROPIC_API_KEY:-}"
-[[ -z "$API_KEY" && -f "$KEY_FILE" ]] && API_KEY=$(cat "$KEY_FILE")
-
-if [[ -z "$API_KEY" ]]; then
-    echo -e "${YELLOW}⚠  No Anthropic API key.${RESET}"
-    echo -e "   Set it with:"
-    echo -e "   mkdir -p ~/.config/skyware && echo 'sk-ant-...' > ~/.config/skyware/api_key"
-    exit 1
-fi
-
-echo -e "\n${CYAN}${BOLD}── SkywareOS AI Doctor ──────────────────────────${RESET}"
-echo -e "${CYAN}→${RESET} Collecting diagnostics..."
-
-JOURNAL_ERRORS=$(sudo journalctl -p err -b --no-pager -n 25 2>/dev/null | tail -25)
-FAILED_UNITS=$(systemctl --failed --no-legend 2>/dev/null)
-PACMAN_LOG=$(tail -n 25 /var/log/pacman.log 2>/dev/null)
-OS_INFO="SkywareOS Maroon 2.0 (Arch-based), kernel $(uname -r)"
-MEM_INFO=$(free -h | awk '/Mem:/{print $3"/"$2}')
-DISK_INFO=$(df -h / | awk 'NR==2{print $3"/"$2" ("$5")"}')
-
-PROMPT="You are a Linux sysadmin assistant for SkywareOS (Arch-based).
-Analyze the diagnostics below. Be concise and specific.
-Format each finding as: [ISSUE] → [FIX COMMAND]
-If everything looks healthy, say so briefly.
-
-OS: $OS_INFO | Memory: $MEM_INFO | Disk: $DISK_INFO
-
-Journal errors (last 25):
-$JOURNAL_ERRORS
-
-Failed systemd units:
-${FAILED_UNITS:-none}
-
-Recent pacman.log:
-$PACMAN_LOG"
-
-echo -e "${CYAN}→${RESET} Consulting Claude...\n"
-
-RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-    -H "x-api-key: $API_KEY" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "content-type: application/json" \
-    -d "$(jq -nc --arg p "$PROMPT" \
-        '{"model":"claude-sonnet-4-20260514","max_tokens":1024,"messages":[{"role":"user","content":$p}]}')" 2>/dev/null)
-
-python3 - << PYEOF
-import json, sys
-try:
-    data = json.loads('''$RESPONSE''')
-    print(data['content'][0]['text'])
-except Exception as e:
-    print(f"Could not parse API response: {e}")
-    print("Check your API key or network connection.")
-PYEOF
-
-echo -e "\n${GREEN}${BOLD}── End of AI diagnosis ──────────────────────────${RESET}\n"
-EOF
-
-    sudo chmod +x /usr/local/bin/ware-ai-doctor
-    ok "AI Doctor installed"
-}
-
-# ── OTA Update notifier ───────────────────────────────────────────────────
+# ── Update notifier ───────────────────────────────────────────────────────
 install_update_notifier() {
     phase "Update notifier"
     sudo pacman -S --noconfirm --needed libnotify python-gobject
@@ -2292,6 +2276,7 @@ if __name__ == "__main__":
 EOF
     sudo chmod +x /usr/local/bin/skyware-update-notifier
 
+    local uid; uid=$(id -u "$ORIGINAL_USER")
     mkdir -p "$ORIGINAL_HOME/.config/systemd/user"
     cat > "$ORIGINAL_HOME/.config/systemd/user/skyware-updates.service" << 'EOF'
 [Unit]
@@ -2311,7 +2296,8 @@ Persistent=true
 WantedBy=default.target
 EOF
 
-    sudo -u "$ORIGINAL_USER" systemctl --user enable skyware-updates.timer 2>/dev/null || true
+    XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        sudo -u "$ORIGINAL_USER" systemctl --user enable skyware-updates.timer 2>/dev/null || true
     ok "Update notifier installed (6-hour checks)"
 }
 
@@ -2325,7 +2311,6 @@ install_settings_app() {
     sudo mkdir -p "$app_dir/src"
     sudo chown -R "$ORIGINAL_USER:$ORIGINAL_USER" "$app_dir"
 
-    # ── package.json ──────────────────────────────────────────────────────
     cat > "$app_dir/package.json" << 'EOF'
 {
   "name": "skyware-settings",
@@ -2338,7 +2323,6 @@ install_settings_app() {
 }
 EOF
 
-    # ── main.js ───────────────────────────────────────────────────────────
     cat > "$app_dir/main.js" << 'EOF'
 const { app, BrowserWindow, ipcMain } = require('electron');
 const { exec, spawn } = require('child_process');
@@ -2371,7 +2355,7 @@ function createWindow() {
   }
 }
 
-const TERMINAL_PREFIXES = ['ware upgrade','ware switch','ware setup','ware snap','ware dm switch'];
+const TERMINAL_PREFIXES = ['ware switch','ware setup','ware snap','ware dm switch'];
 const needsTerminal = (cmd) => TERMINAL_PREFIXES.some(p => cmd.startsWith(p));
 
 ipcMain.handle('run-cmd', (_, cmd) => new Promise(resolve => {
@@ -2411,7 +2395,6 @@ app.whenReady().then(createWindow);
 app.on('window-all-closed', () => process.platform !== 'darwin' && app.quit());
 EOF
 
-    # ── preload.js ────────────────────────────────────────────────────────
     cat > "$app_dir/preload.js" << 'EOF'
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('skyware', {
@@ -2424,14 +2407,12 @@ contextBridge.exposeInMainWorld('skyware', {
 });
 EOF
 
-    # ── vite.config.js ────────────────────────────────────────────────────
     cat > "$app_dir/vite.config.js" << 'EOF'
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 export default defineConfig({ plugins: [react()], base: './', build: { outDir: 'dist' } });
 EOF
 
-    # ── index.html ────────────────────────────────────────────────────────
     cat > "$app_dir/index.html" << 'EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -2453,7 +2434,6 @@ EOF
 EOF
 
     mkdir -p "$app_dir/src"
-    # ── src/main.jsx ──────────────────────────────────────────────────────
     cat > "$app_dir/src/main.jsx" << 'EOF'
 import React from 'react';
 import { createRoot } from 'react-dom/client';
@@ -2461,7 +2441,6 @@ import App from './App.jsx';
 createRoot(document.getElementById('root')).render(<App />);
 EOF
 
-    # ── src/App.jsx ───────────────────────────────────────────────────────
     cat > "$app_dir/src/App.jsx" << 'APPEOF'
 import { useState, useEffect, useRef } from "react";
 
@@ -2483,13 +2462,11 @@ const SIDEBAR = [
   { id:"security", label:"Security",  icon:"🔒" },
   { id:"gaming",   label:"Gaming",    icon:"◎" },
   { id:"envs",     label:"Environments", icon:"⬢" },
-  { id:"ai",       label:"AI Tools",  icon:"✦" },
   { id:"system",   label:"System",    icon:"⚙" },
 ];
 
 const api = cmd => window.skyware?.runCmd(cmd) ?? Promise.resolve({ stdout:`[sim] ${cmd}`, stderr:"", code:0 });
 
-/* ── Terminal hook ── */
 function useTerminal() {
   const [lines, setLines] = useState([]);
   const add = (text, type="info") => setLines(p => [...p, { text, type, id: Date.now() + Math.random() }]);
@@ -2497,7 +2474,6 @@ function useTerminal() {
   return { lines, add, clear };
 }
 
-/* ── TitleBar ── */
 function TitleBar() {
   const btns = [
     { l:"–", a:()=>window.skyware?.minimize(), c:C.yellow },
@@ -2533,7 +2509,6 @@ function TitleBar() {
   );
 }
 
-/* ── Terminal panel ── */
 function Terminal({lines, onClose, onClear}) {
   const ref = useRef(null);
   useEffect(() => { if(ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [lines]);
@@ -2564,7 +2539,6 @@ function Terminal({lines, onClose, onClear}) {
   );
 }
 
-/* ── Shared components ── */
 const Card = ({label,value,highlight}) => (
   <div style={{background:C.bgCard,border:`1px solid ${highlight||C.border}`,
     borderRadius:"8px",padding:"13px 16px",display:"flex",flexDirection:"column",gap:"4px"}}>
@@ -2603,11 +2577,10 @@ const Btn = ({label,cmd,onClick,variant="default",icon,disabled}) => {
   );
 };
 
-/* ── Sections ── */
 function StatusSection({run}) {
   const [s,setS]=useState({
     kernel:"loading…",uptime:"loading…",firewall:"…",
-    disk:"…",memory:"…",desktop:"…",updates:"…",session:"…",hostname:"…"
+    disk:"…",memory:"…",desktop:"…",updates:"…",session:"…",hostname:"…",swap:"…"
   });
   useEffect(()=>{
     api("uname -r").then(r=>setS(p=>({...p,kernel:r.stdout.trim()||"—"})));
@@ -2619,6 +2592,7 @@ function StatusSection({run}) {
     api("echo ${XDG_SESSION_TYPE:-unknown}").then(r=>setS(p=>({...p,session:r.stdout.trim()||"—"})));
     api("hostname").then(r=>setS(p=>({...p,hostname:r.stdout.trim()||"—"})));
     api("checkupdates 2>/dev/null | wc -l || echo 0").then(r=>setS(p=>({...p,updates:r.stdout.trim()||"0"})));
+    api("swapon --show=SIZE,TYPE --noheadings 2>/dev/null | head -1 || echo 'none'").then(r=>setS(p=>({...p,swap:r.stdout.trim()||"none"})));
   },[]);
   const fwHl = s.firewall==="Active" ? C.green+"44" : C.red+"33";
   const updHl = parseInt(s.updates)>0 ? C.yellow+"44" : undefined;
@@ -2636,6 +2610,7 @@ function StatusSection({run}) {
         <Card label="Memory"   value={s.memory}/>
         <Card label="Disk"     value={s.disk}/>
         <Card label="Updates"  value={`${s.updates} available`} highlight={updHl}/>
+        <Card label="Swap"     value={s.swap}/>
       </div>
       <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
         <Btn label="Update System"   cmd="ware update"      onClick={run} icon="↑" variant="success"/>
@@ -2889,42 +2864,6 @@ function EnvsSection({run}) {
   );
 }
 
-function AISection({run}) {
-  const [question, setQuestion] = useState("");
-  const [apiKeyPath] = useState("~/.config/skyware/api_key");
-  return (
-    <div>
-      <Hdr title="AI Tools" sub="Claude-powered system diagnosis and assistant."/>
-      <div style={{display:"flex",flexDirection:"column",gap:"12px"}}>
-        <Btn label="Run AI Doctor"    cmd="ware ai doctor" onClick={run} icon="🤖" variant="accent"/>
-        <div style={{background:C.bgCard,border:`1px solid ${C.border}`,borderRadius:"9px",padding:"16px"}}>
-          <div style={{color:C.text,fontWeight:600,fontSize:"13px",marginBottom:"10px"}}>Ask Claude</div>
-          <div style={{display:"flex",gap:"8px"}}>
-            <input value={question} onChange={e=>setQuestion(e.target.value)}
-              placeholder="Ask a Linux question…"
-              onKeyDown={e=>e.key==="Enter"&&question&&run(`ware ai ask ${question}`,"AI: Ask")}
-              style={{background:"#0e0e10",border:`1px solid ${C.border}`,color:C.text,
-                borderRadius:"6px",padding:"8px 12px",fontSize:"12px",flex:1,
-                outline:"none",fontFamily:"inherit"}}/>
-            <button onClick={()=>question&&run(`ware ai ask ${question}`,"AI: Ask")}
-              style={{background:C.accentHi,border:"none",color:"#111",borderRadius:"6px",
-                padding:"8px 14px",cursor:"pointer",fontSize:"12px",fontFamily:"inherit",fontWeight:600}}>
-              Ask
-            </button>
-          </div>
-        </div>
-        <div style={{background:C.bgCard,border:`1px solid ${C.border}`,
-          borderRadius:"8px",padding:"14px 16px",fontSize:"11px",color:C.textDim,lineHeight:1.7}}>
-          <div style={{color:C.text,marginBottom:"6px",fontWeight:500}}>API Key Setup</div>
-          <code style={{color:C.accent}}>mkdir -p ~/.config/skyware</code><br/>
-          <code style={{color:C.accent}}>echo 'sk-ant-...' &gt; ~/.config/skyware/api_key</code><br/>
-          Or set <code style={{color:C.accent}}>ANTHROPIC_API_KEY</code> environment variable.
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function SystemSection({run}) {
   return (
     <div>
@@ -2937,13 +2876,11 @@ function SystemSection({run}) {
         <Btn label="List Snapshots"     cmd="ware backup list"    onClick={run} icon="☰"/>
         <Btn label="Open SkywareOS.io"  cmd="ware git"            onClick={run} icon="◎"/>
         <Btn label="Dual Boot Setup"    cmd="ware dualboot"       onClick={run} icon="⬡"/>
-        <Btn label="Upgrade SkywareOS"  cmd="ware upgrade"        onClick={run} icon="↑" variant="success"/>
       </div>
     </div>
   );
 }
 
-/* ── Root App ── */
 export default function App() {
   const [active, setActive] = useState("status");
   const [termOpen, setTermOpen] = useState(false);
@@ -2963,7 +2900,7 @@ export default function App() {
   const sections = {
     status: StatusSection, packages: PackagesSection, power: PowerSection,
     display: DisplaySection, network: NetworkSection, security: SecuritySection,
-    gaming: GamingSection, envs: EnvsSection, ai: AISection, system: SystemSection,
+    gaming: GamingSection, envs: EnvsSection, system: SystemSection,
   };
   const Section = sections[active] || StatusSection;
 
@@ -2973,7 +2910,6 @@ export default function App() {
       color:C.text,display:"flex",flexDirection:"column",overflow:"hidden",position:"relative"}}>
       <TitleBar/>
       <div style={{display:"flex",flex:1,overflow:"hidden"}}>
-        {/* Sidebar */}
         <div style={{width:"180px",background:C.bgSide,
           borderRight:`1px solid ${C.borderFaint}`,flexShrink:0,
           padding:"12px 0",overflowY:"auto",display:"flex",flexDirection:"column"}}>
@@ -2996,13 +2932,11 @@ export default function App() {
             </div>
           </div>
         </div>
-        {/* Content */}
         <div style={{flex:1,padding:"24px 28px",overflowY:"auto",
           paddingBottom: termOpen ? "226px" : "24px"}}>
           <Section run={run}/>
         </div>
       </div>
-      {/* Terminal */}
       {termOpen && <Terminal lines={lines} onClose={()=>setTermOpen(false)} onClear={clear}/>}
       {!termOpen && (
         <button onClick={()=>{setTermOpen(true);if(lines.length===0)add("Terminal ready.","info");}}
@@ -3019,11 +2953,9 @@ export default function App() {
 }
 APPEOF
 
-    # ── Build ─────────────────────────────────────────────────────────────
-    info "Installing npm dependencies..."
     cd "$app_dir"
+    info "Installing npm dependencies..."
     npm install 2>&1 | tail -5
-    npm install --save-dev electron 2>&1 | tail -3
 
     info "Building React app..."
     npx vite build 2>&1 | tail -5
@@ -3033,11 +2965,9 @@ APPEOF
         npx vite build
     fi
 
-    # Fix ownership back to root
     sudo chown -R root:root "$app_dir"
     sudo chmod -R a+rX "$app_dir"
 
-    # ── Launcher script ───────────────────────────────────────────────────
     sudo tee /usr/local/bin/skyware-settings > /dev/null << 'EOF'
 #!/bin/bash
 cd /opt/skyware-settings
@@ -3045,7 +2975,6 @@ exec npx electron . "$@"
 EOF
     sudo chmod +x /usr/local/bin/skyware-settings
 
-    # ── .desktop ─────────────────────────────────────────────────────────
     sudo tee /usr/share/applications/skyware-settings.desktop > /dev/null << 'EOF'
 [Desktop Entry]
 Name=SkywareOS Settings
@@ -3178,19 +3107,18 @@ const STEPS = [
 ];
 const FEATURES = [
   {icon:"⬡",t:"ware",d:"Unified package manager wrapping pacman, flatpak, and AUR."},
-  {icon:"⚙",t:"Settings App",d:"Full GUI — packages, power, security, networking, AI."},
+  {icon:"⚙",t:"Settings App",d:"Full GUI — packages, power, security, networking."},
   {icon:"⚡",t:"GameMode + MangoHud",d:"Performance overlay and CPU/GPU boost for gaming."},
-  {icon:"◈",t:"AI Doctor",d:"ware ai doctor — Claude diagnoses your system issues."},
   {icon:"🔒",t:"Security Suite",d:"UFW, AppArmor, USBGuard, fail2ban — all pre-configured."},
   {icon:"◉",t:"Wayland-first",d:"All DEs default to Wayland. X11 available as fallback."},
   {icon:"💾",t:"Auto-snapshots",d:"Timeshift configured for weekly + monthly backups."},
+  {icon:"⟳",t:"Mirror Sync",d:"Reflector keeps your pacman mirrors fast, updated weekly."},
   {icon:"◎",t:"Network Tools",d:"WiFi wizard, DNS switcher, speed test — all in ware."},
 ];
 const CMDS = [
   ["ware help",           "Full command list"],
   ["ware install <pkg>",  "Install any package"],
   ["ware update",         "Update everything"],
-  ["ware ai doctor",      "AI system diagnosis"],
   ["ware benchmark",      "CPU/RAM/disk test"],
   ["ware network wifi",   "Connect to WiFi"],
   ["skyware-settings",    "Open Settings GUI"],
@@ -3205,7 +3133,6 @@ export default function App() {
     <div style={{height:"100vh",background:C.bg,
       fontFamily:"'Segoe UI',system-ui,sans-serif",color:C.text,
       display:"flex",flexDirection:"column",overflow:"hidden"}}>
-      {/* Title */}
       <div style={{height:"44px",background:"#0a0a0c",
         borderBottom:`1px solid ${C.border}`,display:"flex",
         alignItems:"center",justifyContent:"space-between",
@@ -3220,7 +3147,6 @@ export default function App() {
         <button onClick={()=>window.welcome?.close()} style={{WebkitAppRegion:"no-drag",
           background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:"16px"}}>×</button>
       </div>
-      {/* Steps */}
       <div style={{display:"flex",justifyContent:"center",gap:"6px",padding:"16px 0 0",flexShrink:0}}>
         {STEPS.map((st,i)=>(
           <div key={st.id} style={{display:"flex",alignItems:"center",gap:"6px"}}>
@@ -3233,11 +3159,10 @@ export default function App() {
           </div>
         ))}
       </div>
-      {/* Content */}
       <div style={{flex:1,padding:"20px 36px",overflowY:"auto"}}>
         {s.id==="welcome" && (
           <div style={{textAlign:"center",paddingTop:"4px"}}>
-            <pre style={{fontFamily:"monospace",fontSize:"10px",color:C.muted,
+            <pre style={{fontFamily:"monospace",fontSize:"10px",color:C.dim,
               lineHeight:1.6,marginBottom:"16px",display:"inline-block",textAlign:"left"}}>{
 `      @@@@@@@-         +@@@@@@.
     %@@@@@@@@@@=      @@@@@@@@@@
@@ -3257,7 +3182,7 @@ export default function App() {
               An Arch-based Linux distro built for performance, customisation, and a clean Wayland-first experience.
             </p>
             <div style={{display:"flex",justifyContent:"center",gap:"8px",marginTop:"16px",flexWrap:"wrap"}}>
-              {["Wayland-first","ware v2.0","AI-powered","Maroon 2.0"].map(tag=>(
+              {["Wayland-first","ware v2.0","Maroon 2.0"].map(tag=>(
                 <span key={tag} style={{background:C.card,border:`1px solid ${C.border}`,
                   color:C.dim,fontSize:"10px",borderRadius:"999px",padding:"3px 10px"}}>{tag}</span>
               ))}
@@ -3311,7 +3236,7 @@ export default function App() {
               padding:"14px 20px",display:"inline-block",textAlign:"left"}}>
               <div style={{fontFamily:"monospace",fontSize:"11px",color:C.dim,lineHeight:2.2}}>
                 {[["ware help","→ all commands"],["ware update","→ update system"],
-                  ["ware ai doctor","→ AI diagnosis"],["skyware-settings","→ GUI"]].map(([c,d])=>(
+                  ["skyware-settings","→ GUI"]].map(([c,d])=>(
                   <div key={c}><span style={{color:C.accent}}>$ </span>{c} <span style={{color:C.muted}}>{d}</span></div>
                 ))}
               </div>
@@ -3319,7 +3244,6 @@ export default function App() {
           </div>
         )}
       </div>
-      {/* Footer */}
       <div style={{padding:"14px 36px",borderTop:`1px solid ${C.border}`,
         display:"flex",justifyContent:"space-between",alignItems:"center",
         flexShrink:0,background:"#0a0a0c"}}>
@@ -3348,10 +3272,8 @@ export default function App() {
 }
 WELCOMEEOF
 
-    # Build
     cd "$app_dir"
     npm install 2>&1 | tail -5
-    npm install --save-dev electron 2>&1 | tail -3
     npx vite build 2>&1 | tail -5
 
     sudo chown -R root:root "$app_dir"
@@ -3393,22 +3315,21 @@ EOF
 final_cleanup() {
     phase "Final cleanup"
 
-    # xdg user dirs
     sudo -u "$ORIGINAL_USER" xdg-user-dirs-update 2>/dev/null || true
-
-    # Enable NetworkManager
     sudo systemctl enable NetworkManager 2>/dev/null || true
 
-    # SystemD user services for original user
-    sudo -u "$ORIGINAL_USER" systemctl --user daemon-reload 2>/dev/null || true
+    local uid; uid=$(id -u "$ORIGINAL_USER")
+    XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        sudo -u "$ORIGINAL_USER" systemctl --user daemon-reload 2>/dev/null || true
 
-    # Ensure wheel group exists and user is in it
     sudo groupadd -f wheel
     sudo usermod -aG wheel,docker,audio,video,storage,gamemode "$ORIGINAL_USER" 2>/dev/null || true
 
-    # Remove orphans
     local orphans; orphans=$(pacman -Qtdq 2>/dev/null || true)
     [[ -n "$orphans" ]] && sudo pacman -Rns --noconfirm $orphans 2>/dev/null || true
+
+    # Final GRUB regeneration to pick up all changes (Plymouth initrd, kernel params)
+    _regen_grub
 
     ok "Cleanup complete"
 }
@@ -3422,18 +3343,18 @@ print_summary() {
     echo -e "  ${GREEN}✔${RESET}  SkywareOS Maroon 2.0 fully installed"
     echo -e "  ${GREEN}✔${RESET}  ware v2.0 package manager available"
     echo -e "  ${GREEN}✔${RESET}  Settings app at: ${CYAN}skyware-settings${RESET}"
-    echo -e "  ${GREEN}✔${RESET}  AI Doctor at:    ${CYAN}ware ai doctor${RESET}"
+    echo -e "  ${GREEN}✔${RESET}  Zram swap configured"
+    echo -e "  ${GREEN}✔${RESET}  Reflector mirror timer enabled"
     echo -e "  ${GREEN}✔${RESET}  Setup log:       ${CYAN}$LOGFILE${RESET}"
     echo ""
     echo -e "  ${YELLOW}!${RESET}  A ${BOLD}reboot is required${RESET} to apply all changes."
     echo ""
     echo -e "  ${DIM}New in v2.0:${RESET}"
-    echo -e "  ${DIM}→${RESET}  ware ai ask <question>   AI assistant in terminal"
     echo -e "  ${DIM}→${RESET}  ware network <action>    Network wizard"
     echo -e "  ${DIM}→${RESET}  ware luks <action>       Encryption helpers"
     echo -e "  ${DIM}→${RESET}  ware disk-health         SMART disk report"
     echo -e "  ${DIM}→${RESET}  ware backup restic-*     restic integration"
-    echo -e "  ${DIM}→${RESET}  Settings: 10 sections    AI, gaming, security, network"
+    echo -e "  ${DIM}→${RESET}  Settings: 9 sections     gaming, security, network"
     echo ""
 }
 
@@ -3453,10 +3374,13 @@ BANNER
     preflight
     configure_sudo
     configure_pacman
+    configure_reflector
     ensure_paru
     install_base
+    configure_zram
     install_gpu_drivers
     install_desktop
+    configure_grub
     configure_sddm
     configure_plymouth
     configure_limine
@@ -3484,7 +3408,6 @@ BANNER
     configure_timeshift
     configure_dotfiles
     install_ware
-    install_ai_doctor
     install_update_notifier
     install_settings_app
     install_welcome_app
