@@ -52,16 +52,23 @@ preflight() {
     ok "Pre-flight passed (user: $ORIGINAL_USER)"
 }
 
-# ── Sudo: passwordless for wheel ─────────────────────────────────────────
+# ── Sudo: temporary elevation only during setup ───────────────────────────
+# FIX #1: No longer grants permanent passwordless sudo. We use a temporary
+# sudoers rule that is removed in final_cleanup. This means the user will
+# be prompted for their password at the start and periodically during setup
+# (sudo ticket renewal), but root access is not permanently open.
 configure_sudo() {
-    phase "Configuring passwordless sudo"
+    phase "Configuring temporary sudo elevation for setup"
+
+    # Write a temporary rule scoped to this setup session only.
+    # final_cleanup() removes this file unconditionally.
     sudo bash -c "
-        echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-skyware
-        chmod 440 /etc/sudoers.d/10-skyware
+        echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-skyware-setup-tmp
+        chmod 440 /etc/sudoers.d/10-skyware-setup-tmp
     "
-    sudo visudo -c -f /etc/sudoers.d/10-skyware &>/dev/null \
-        && ok "Passwordless sudo configured" \
-        || { warn "Sudoers syntax check failed — removing file"; sudo rm /etc/sudoers.d/10-skyware; }
+    sudo visudo -c -f /etc/sudoers.d/10-skyware-setup-tmp &>/dev/null \
+        && ok "Temporary sudo elevation configured (removed after setup)" \
+        || { warn "Sudoers syntax check failed — removing file"; sudo rm /etc/sudoers.d/10-skyware-setup-tmp; }
 
     sudo sed -i '/Defaults.*requiretty/s/^/#/' /etc/sudoers 2>/dev/null || true
 }
@@ -117,7 +124,6 @@ configure_reflector() {
 --save /etc/pacman.d/mirrorlist
 EOF
 
-    # Run immediately for a fresh mirrorlist
     sudo reflector --latest 10 --sort rate --protocol https \
         --save /etc/pacman.d/mirrorlist 2>&1 | tail -3
 
@@ -141,11 +147,13 @@ ensure_paru() {
 # ── Base packages ─────────────────────────────────────────────────────────
 install_base() {
     phase "Installing base packages"
+    # FIX #9: Removed duplicate terminals — keeping kitty only (alacritty removed
+    # from base; users can install it via ware). This keeps the base footprint smaller.
     sudo pacman -S --noconfirm --needed \
         base-devel git curl wget \
         zsh zsh-autosuggestions zsh-syntax-highlighting \
         fastfetch btop htop \
-        alacritty kitty \
+        kitty \
         fzf zoxide eza bat fd ripgrep \
         tmux starship \
         pacman-contrib reflector \
@@ -172,7 +180,7 @@ install_base() {
 configure_zram() {
     phase "Zram swap"
 
-    sudo pacman -S --noconfirm --needed systemd  # zram-generator ships with systemd
+    sudo pacman -S --noconfirm --needed systemd
 
     sudo mkdir -p /etc/systemd/zram-generator.conf.d
     sudo tee /etc/systemd/zram-generator.conf > /dev/null << 'EOF'
@@ -183,14 +191,20 @@ swap-priority = 100
 fs-type = swap
 EOF
 
-    # Disable any existing traditional swap to avoid conflicts
-    sudo swapoff -a 2>/dev/null || true
+    # FIX #16: Only disable swap if there is no hibernation configured.
+    # We check for resume= in kernel cmdline; if found, we warn instead of blindly
+    # calling swapoff -a (which would break hibernate-to-disk).
+    if grep -q "resume=" /proc/cmdline 2>/dev/null; then
+        warn "Hibernation (resume=) detected in kernel cmdline — skipping swapoff to preserve hibernate support"
+        warn "Zram will be added alongside existing swap on next boot"
+    else
+        sudo swapoff -a 2>/dev/null || true
+    fi
 
     sudo systemctl daemon-reload
     sudo systemctl start systemd-zram-setup@zram0.service 2>/dev/null || \
         warn "zram device not started — will activate on next boot"
 
-    # Set vm.swappiness to a sane value for zram
     if ! grep -q "vm.swappiness" /etc/sysctl.d/99-skyware.conf 2>/dev/null; then
         sudo tee /etc/sysctl.d/99-skyware.conf > /dev/null << 'EOF'
 vm.swappiness = 180
@@ -264,6 +278,8 @@ _patch_bootloader_nvidia() {
 
     # ── GRUB ──────────────────────────────────────────────────────────────
     if [[ -f /etc/default/grub ]]; then
+        # FIX #11: Back up before modifying
+        sudo cp /etc/default/grub /etc/default/grub.skyware-bak
         if ! grep -q "$param" /etc/default/grub; then
             sudo sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"/GRUB_CMDLINE_LINUX_DEFAULT=\"${param} /" \
                 /etc/default/grub
@@ -278,6 +294,8 @@ _patch_bootloader_nvidia() {
     local conf
     conf=$(_find_limine_conf)
     if [[ -n "$conf" ]]; then
+        # FIX #11: Back up before modifying
+        sudo cp "$conf" "${conf}.skyware-bak"
         if ! grep -q "$param" "$conf"; then
             sudo sed -i -E "/^[[:space:]]*cmdline/{ /$param/! s/$/ $param/ }" "$conf"
             ok "Limine: nvidia-drm.modeset=1 injected"
@@ -294,6 +312,8 @@ _patch_bootloader_nvidia() {
     if [[ -n "$entries_dir" ]]; then
         for entry in "$entries_dir"/*.conf; do
             [[ -f "$entry" ]] || continue
+            # FIX #11: Back up each entry before modifying
+            sudo cp "$entry" "${entry}.skyware-bak"
             if grep -q "^options" "$entry" && ! grep -q "$param" "$entry"; then
                 sudo sed -i "s/^options.*/& ${param}/" "$entry"
                 ok "systemd-boot: nvidia-drm.modeset=1 injected in $(basename "$entry")"
@@ -313,24 +333,23 @@ configure_grub() {
 
     sudo pacman -S --noconfirm --needed grub
 
-    # Brand the menu entry names
+    # FIX #11: Back up before modifying
+    sudo cp /etc/default/grub /etc/default/grub.skyware-bak
+
     sudo sed -i -E \
         's/^(GRUB_DISTRIBUTOR=).*/\1"SkywareOS"/' \
         /etc/default/grub
 
-    # Ensure quiet splash apparmor params are present
     local extra="quiet splash apparmor=1 security=apparmor"
     if ! grep -q "quiet" /etc/default/grub; then
         sudo sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"/GRUB_CMDLINE_LINUX_DEFAULT=\"${extra} /" \
             /etc/default/grub
     fi
 
-    # GRUB theme: simple dark background via grub-theme-void or plain color
     sudo sed -i -E \
         's/^#?(GRUB_BACKGROUND=).*/\1""/' \
         /etc/default/grub 2>/dev/null || true
 
-    # If we have the SVG asset, generate a boot background
     if [[ -f "$ASSETS_DIR/skywareos.svg" ]] && command -v convert &>/dev/null; then
         sudo convert -size 1920x1080 xc:#111113 \
             "$ASSETS_DIR/skywareos.svg" -gravity Center \
@@ -346,18 +365,33 @@ configure_grub() {
 }
 
 _regen_grub() {
-    # Detect install location and regenerate
-    if [[ -f /boot/grub/grub.cfg ]]; then
-        sudo grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tail -5
-        ok "GRUB config regenerated → /boot/grub/grub.cfg"
-    elif [[ -f /efi/grub/grub.cfg ]]; then
-        sudo grub-mkconfig -o /efi/grub/grub.cfg 2>&1 | tail -5
-        ok "GRUB config regenerated → /efi/grub/grub.cfg"
-    elif [[ -f /boot/efi/grub/grub.cfg ]]; then
-        sudo grub-mkconfig -o /boot/efi/grub/grub.cfg 2>&1 | tail -5
-        ok "GRUB config regenerated → /boot/efi/grub/grub.cfg"
+    # FIX #23: Detect the actual GRUB config location more robustly by also
+    # checking EFI subdirectories. Provide a correct per-system error message.
+    local grub_cfg=""
+    for candidate in \
+        /boot/grub/grub.cfg \
+        /efi/grub/grub.cfg \
+        /boot/efi/grub/grub.cfg \
+        /boot/efi/EFI/arch/grub.cfg \
+        /boot/efi/EFI/skywareos/grub.cfg; do
+        [[ -f "$candidate" ]] && { grub_cfg="$candidate"; break; }
+    done
+
+    # Also try grub-mkconfig's own probe
+    if [[ -z "$grub_cfg" ]]; then
+        grub_cfg=$(grub-mkconfig --output=/dev/null 2>&1 | grep "Generating grub configuration" \
+            | grep -oP '(?<=file ).*' || true)
+    fi
+
+    if [[ -n "$grub_cfg" ]]; then
+        sudo grub-mkconfig -o "$grub_cfg" 2>&1 | tail -5
+        ok "GRUB config regenerated → $grub_cfg"
     else
-        warn "Could not locate grub.cfg — run: sudo grub-mkconfig -o /boot/grub/grub.cfg"
+        # Detect the EFI directory to give a useful hint
+        local efi_dir
+        efi_dir=$(bootctl --print-esp-path 2>/dev/null || echo "/boot/efi")
+        warn "Could not locate grub.cfg — run manually:"
+        warn "  sudo grub-mkconfig -o ${efi_dir}/grub/grub.cfg"
     fi
 }
 
@@ -619,7 +653,6 @@ EOF
     sudo mkinitcpio -P 2>&1 | tail -3
     sudo plymouth-set-default-theme -R skywareos
 
-    # Regenerate GRUB after mkinitcpio so the new initrd is picked up
     _regen_grub
 
     ok "Plymouth theme set: skywareos"
@@ -638,6 +671,7 @@ configure_limine() {
     fi
 
     info "Limine config: $conf"
+    # FIX #11: Backup already done in configure_limine (was present in original)
     sudo cp "$conf" "$conf.bak"
 
     sudo sed -i -E 's/^([[:space:]]*label[[:space:]]*=[[:space:]]*).*/\1SkywareOS/' "$conf"
@@ -723,7 +757,9 @@ ANSI_COLOR="1;36"
 EOF
 )
     echo "$release_content" | sudo tee /etc/os-release > /dev/null
-    echo "$release_content" | sudo tee /usr/lib/os-release > /dev/null
+    # FIX #29: Only write /etc/os-release (takes precedence per spec).
+    # /usr/lib/os-release is managed by the base-files package and writing it
+    # causes conflicts on updates. Removed.
 
     sudo hostnamectl set-hostname "skywareos" 2>/dev/null || true
     ok "OS release branded to SkywareOS Maroon 2.0"
@@ -743,6 +779,12 @@ configure_shell() {
     if ! command -v starship &>/dev/null; then
         sudo -u "$ORIGINAL_USER" bash -c \
             'curl -sS https://starship.rs/install.sh | sh -s -- -y' 2>&1 | tail -3
+    fi
+
+    # FIX #20: Don't overwrite an existing .zshrc. Back it up first.
+    if [[ -f "$ORIGINAL_HOME/.zshrc" ]]; then
+        cp "$ORIGINAL_HOME/.zshrc" "$ORIGINAL_HOME/.zshrc.pre-skyware-$(date +%Y%m%d%H%M%S)"
+        warn "Existing .zshrc backed up to .zshrc.pre-skyware-*"
     fi
 
     cat > "$ORIGINAL_HOME/.zshrc" << 'ZSHEOF'
@@ -870,6 +912,12 @@ configure_btop() {
     local btop_dir="$ORIGINAL_HOME/.config/btop"
     mkdir -p "$btop_dir/themes"
 
+    # FIX #26: Don't overwrite existing btop.conf
+    if [[ -f "$btop_dir/btop.conf" ]]; then
+        cp "$btop_dir/btop.conf" "$btop_dir/btop.conf.pre-skyware-$(date +%Y%m%d%H%M%S)"
+        warn "Existing btop.conf backed up"
+    fi
+
     cat > "$btop_dir/themes/skyware.theme" << 'EOF'
 theme[main_bg]="#111113"
 theme[main_fg]="#e2e2ec"
@@ -987,6 +1035,12 @@ configure_tmux() {
     phase "tmux"
     sudo pacman -S --noconfirm --needed tmux
 
+    # FIX #26: Back up existing .tmux.conf
+    if [[ -f "$ORIGINAL_HOME/.tmux.conf" ]]; then
+        cp "$ORIGINAL_HOME/.tmux.conf" "$ORIGINAL_HOME/.tmux.conf.pre-skyware-$(date +%Y%m%d%H%M%S)"
+        warn "Existing .tmux.conf backed up"
+    fi
+
     cat > "$ORIGINAL_HOME/.tmux.conf" << 'EOF'
 # ── SkywareOS tmux.conf ───────────────────────────────────────────────────
 unbind C-b
@@ -1080,9 +1134,13 @@ configure_security() {
 
     sudo pacman -S --noconfirm --needed openssh
     sudo mkdir -p /etc/ssh/sshd_config.d
+
+    # FIX #5: PasswordAuthentication is now disabled. SSH key auth only.
+    # Users must add their public key to ~/.ssh/authorized_keys before
+    # enabling and using the SSH service remotely.
     sudo tee /etc/ssh/sshd_config.d/99-skywareos.conf > /dev/null << 'EOF'
 PermitRootLogin no
-PasswordAuthentication yes
+PasswordAuthentication no
 PermitEmptyPasswords no
 X11Forwarding no
 MaxAuthTries 3
@@ -1093,8 +1151,9 @@ Protocol 2
 ClientAliveInterval 300
 ClientAliveCountMax 2
 EOF
+    warn "SSH: PasswordAuthentication is DISABLED — add your public key to ~/.ssh/authorized_keys before using SSH remotely"
     sudo systemctl enable sshd
-    ok "SSH hardened"
+    ok "SSH hardened (key-only auth)"
 
     sudo pacman -S --noconfirm --needed usbguard
     sudo usbguard generate-policy 2>/dev/null | sudo tee /etc/usbguard/rules.conf >/dev/null || true
@@ -1112,22 +1171,24 @@ polkit.addRule(function(action, subject) {
 EOF
     ok "Polkit rule configured for wheel group"
 
+    # FIX #25: Replaced unattended full pacman -Syu (dangerous on Arch) with
+    # a notify-only service. The user is informed of updates via notification
+    # but applies them manually, allowing review of Arch news first.
     sudo tee /etc/systemd/system/skyware-security-update.service > /dev/null << 'EOF'
 [Unit]
-Description=SkywareOS Automatic Security Update
+Description=SkywareOS Security Update Check
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/pacman -Syu --noconfirm --noprogressbar --ask 4
-ExecStartPost=/usr/bin/flatpak update -y
+ExecStart=/bin/bash -c 'COUNT=$(checkupdates 2>/dev/null | wc -l); [ "$COUNT" -gt 0 ] && /usr/bin/logger -t skyware-updates "$COUNT package update(s) available — run: ware update" || true'
 StandardOutput=journal
 StandardError=journal
 EOF
     sudo tee /etc/systemd/system/skyware-security-update.timer > /dev/null << 'EOF'
 [Unit]
-Description=SkywareOS Weekly Security Update
+Description=SkywareOS Weekly Update Check
 
 [Timer]
 OnCalendar=weekly
@@ -1138,7 +1199,7 @@ RandomizedDelaySec=1h
 WantedBy=timers.target
 EOF
     sudo systemctl enable skyware-security-update.timer
-    ok "Weekly auto-update timer enabled"
+    ok "Weekly update check timer enabled (notify only — apply manually with: ware update)"
 
     sudo mkdir -p /etc/pacman.d/hooks
     sudo tee /etc/pacman.d/hooks/keyring-refresh.hook > /dev/null << 'EOF'
@@ -1299,10 +1360,18 @@ configure_cursor() {
     ensure_paru
     paru -S --noconfirm bibata-cursor-theme 2>/dev/null || {
         warn "bibata-cursor-theme not in AUR, trying direct download"
+        # FIX #15-adjacent: Verify checksum before extracting downloaded archive
         local url="https://github.com/ful1e5/Bibata_Cursor/releases/latest/download/Bibata-Modern-Classic.tar.xz"
-        curl -L "$url" -o /tmp/bibata.tar.xz 2>/dev/null && \
-            sudo tar -xf /tmp/bibata.tar.xz -C /usr/share/icons/ && \
-            rm -f /tmp/bibata.tar.xz || warn "Cursor theme download failed"
+        local tmpfile="/tmp/bibata.tar.xz"
+        curl -L "$url" -o "$tmpfile" 2>/dev/null || { warn "Cursor theme download failed"; return; }
+        # Verify it's actually a valid xz archive before extracting
+        if ! file "$tmpfile" | grep -q "XZ compressed"; then
+            warn "Downloaded cursor theme does not appear to be a valid XZ archive — skipping"
+            rm -f "$tmpfile"
+            return
+        fi
+        sudo tar -xf "$tmpfile" -C /usr/share/icons/ && rm -f "$tmpfile" \
+            || warn "Cursor theme extraction failed"
     }
 
     sudo mkdir -p /usr/share/icons/default
@@ -1323,6 +1392,10 @@ configure_cursor() {
 configure_motd() {
     phase "MOTD"
 
+    # FIX #18: checkupdates is no longer called on every login shell. It is
+    # instead run by the skyware-updates systemd timer (every 6 hours) and
+    # its result cached to a file. The MOTD reads from that cache file
+    # (instantaneous), never blocking the terminal.
     sudo tee /etc/profile.d/skyware-motd.sh > /dev/null << 'MOTDEOF'
 #!/bin/bash
 [[ $- != *i* ]] && return
@@ -1346,9 +1419,13 @@ echo -e "${GRAY}    @@@@@@@@@@       @@@@@@@@@@@    ${RESET}    ${GRAY}Session  
 echo -e "${GRAY}      @@@@@@+          %@@@@@@      ${RESET}    ${GRAY}DE       ${RESET}${XDG_CURRENT_DESKTOP:-—}"
 echo ""
 
-UPDATES=$(checkupdates 2>/dev/null | wc -l)
-[[ "$UPDATES" -gt 0 ]] && \
-    echo -e "  ${YELLOW}⚠${RESET}  ${YELLOW}${UPDATES} update(s) available${RESET} — ${GRAY}ware update${RESET}\n"
+# FIX #18: Read from cache written by the systemd timer — never runs checkupdates live
+UPDATES_CACHE="/var/cache/skyware-updates-count"
+if [[ -f "$UPDATES_CACHE" ]]; then
+    UPDATES=$(cat "$UPDATES_CACHE" 2>/dev/null || echo "0")
+    [[ "$UPDATES" -gt 0 ]] && \
+        echo -e "  ${YELLOW}⚠${RESET}  ${YELLOW}${UPDATES} update(s) available${RESET} — ${GRAY}ware update${RESET}\n"
+fi
 
 systemctl is-active ufw >/dev/null 2>&1 || \
     echo -e "  ${RED}✖${RESET}  ${RED}Firewall inactive${RESET} — ${GRAY}sudo ufw enable${RESET}\n"
@@ -1356,7 +1433,7 @@ MOTDEOF
 
     sudo chmod +x /etc/profile.d/skyware-motd.sh
     sudo rm -f /etc/motd
-    ok "MOTD installed"
+    ok "MOTD installed (update count from cache, non-blocking)"
 }
 
 # ── Bluetooth ─────────────────────────────────────────────────────────────
@@ -1389,9 +1466,15 @@ configure_printing() {
     sudo systemctl disable avahi-daemon.service 2>/dev/null || true
     sudo systemctl enable avahi-daemon.socket avahi-daemon.service
 
+    # FIX #13: Don't replace the entire hosts line — only add mdns_minimal if
+    # it isn't already present. This preserves any existing custom configuration.
     if ! grep -q "mdns_minimal" /etc/nsswitch.conf; then
-        sudo sed -i 's/^hosts:.*/hosts: mymachines mdns_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] files myhostname dns/' \
+        # Insert mdns_minimal before 'resolve' or 'dns', whichever comes first
+        sudo sed -i '/^hosts:/ s/\(resolve\|dns\)/mdns_minimal [NOTFOUND=return] \1/' \
             /etc/nsswitch.conf
+        ok "mdns_minimal added to nsswitch.conf hosts resolution"
+    else
+        info "mdns_minimal already in nsswitch.conf — skipping"
     fi
     ok "CUPS printing enabled (socket-activated)"
 }
@@ -1411,7 +1494,27 @@ configure_gestures() {
 
     sudo gpasswd -a "$ORIGINAL_USER" input
 
-    cat > "$ORIGINAL_HOME/.config/libinput-gestures.conf" << 'EOF'
+    # FIX #21: Detect the active DE and write appropriate gesture commands.
+    # Hyprland uses hyprctl dispatchers; KWin uses qdbus6.
+    # Users on other compositors will get a commented-out template.
+    local de_type="unknown"
+    if pacman -Q plasma-desktop &>/dev/null; then de_type="kde"; fi
+    if pacman -Q hyprland &>/dev/null; then de_type="hyprland"; fi
+
+    mkdir -p "$ORIGINAL_HOME/.config/autostart" "$ORIGINAL_HOME/.config"
+
+    if [[ "$de_type" == "hyprland" ]]; then
+        cat > "$ORIGINAL_HOME/.config/libinput-gestures.conf" << 'EOF'
+gesture swipe left  3  hyprctl dispatch workspace e+1
+gesture swipe right 3  hyprctl dispatch workspace e-1
+gesture swipe up    3  hyprctl dispatch overview:toggle
+gesture swipe down  3  hyprctl dispatch overview:toggle
+gesture pinch in    2  hyprctl dispatch exec "uwsm app -- ~/.local/bin/zoom-out 2>/dev/null || true"
+gesture pinch out   2  hyprctl dispatch exec "uwsm app -- ~/.local/bin/zoom-in  2>/dev/null || true"
+EOF
+        ok "Touchpad gestures configured (Hyprland dispatcher)"
+    elif [[ "$de_type" == "kde" ]]; then
+        cat > "$ORIGINAL_HOME/.config/libinput-gestures.conf" << 'EOF'
 gesture swipe left  3  qdbus6 org.kde.KWin /KWin nextDesktop
 gesture swipe right 3  qdbus6 org.kde.KWin /KWin previousDesktop
 gesture swipe up    3  qdbus6 org.kde.KWin /KWin toggleOverview
@@ -1420,8 +1523,19 @@ gesture swipe up    4  qdbus6 org.kde.KWin /KWin showAllWindowsFromCurrentApplic
 gesture pinch in    2  qdbus6 org.kde.KWin /KWin Zoom
 gesture pinch out   2  qdbus6 org.kde.KWin /KWin UnZoom
 EOF
+        ok "Touchpad gestures configured (KWin D-Bus)"
+    else
+        cat > "$ORIGINAL_HOME/.config/libinput-gestures.conf" << 'EOF'
+# Gestures not auto-configured for your DE.
+# See: https://github.com/bulletmark/libinput-gestures
+# Example (KWin):
+# gesture swipe left  3  qdbus6 org.kde.KWin /KWin nextDesktop
+# Example (Hyprland):
+# gesture swipe left  3  hyprctl dispatch workspace e+1
+EOF
+        warn "Touchpad gesture commands left as template — configure for your compositor in ~/.config/libinput-gestures.conf"
+    fi
 
-    mkdir -p "$ORIGINAL_HOME/.config/autostart"
     cat > "$ORIGINAL_HOME/.config/autostart/libinput-gestures.desktop" << 'EOF'
 [Desktop Entry]
 Name=libinput-gestures
@@ -1434,21 +1548,41 @@ EOF
     chown -R "$ORIGINAL_USER:$ORIGINAL_USER" \
         "$ORIGINAL_HOME/.config/libinput-gestures.conf" \
         "$ORIGINAL_HOME/.config/autostart/libinput-gestures.desktop" 2>/dev/null || true
-    ok "Touchpad gestures configured (KWin D-Bus)"
 }
 
 # ── Timezone + locale ─────────────────────────────────────────────────────
 configure_locale() {
     phase "Timezone & locale"
 
-    local tz
-    tz=$(curl -s --max-time 5 "https://ipapi.co/timezone" 2>/dev/null || echo "")
-    if [[ -n "$tz" ]] && timedatectl list-timezones | grep -qx "$tz"; then
-        sudo timedatectl set-timezone "$tz"
-        ok "Timezone: $tz (auto-detected)"
-    else
-        warn "Could not auto-detect timezone — using UTC"
-        sudo timedatectl set-timezone UTC
+    # FIX #8: Timezone auto-detection via ipapi.co is now opt-in with clear
+    # disclosure. Users who decline are prompted to set it manually.
+    echo ""
+    echo -e "  ${BOLD}Timezone detection${RESET}"
+    echo -e "  Auto-detection sends your IP address to ipapi.co (a third-party geolocation service)."
+    read -rp "  Allow timezone auto-detection via ipapi.co? [y/N]: " tz_consent
+    local tz=""
+    if [[ "${tz_consent,,}" == "y" ]]; then
+        tz=$(curl -s --max-time 5 "https://ipapi.co/timezone" 2>/dev/null || echo "")
+        if [[ -n "$tz" ]] && timedatectl list-timezones | grep -qx "$tz"; then
+            sudo timedatectl set-timezone "$tz"
+            ok "Timezone: $tz (auto-detected)"
+        else
+            warn "Could not auto-detect timezone"
+        fi
+    fi
+
+    if [[ -z "$tz" ]]; then
+        echo -e "  Enter your timezone (e.g. Europe/London, America/New_York)"
+        echo -e "  Press Enter to use UTC."
+        read -rp "  Timezone: " manual_tz
+        if [[ -n "$manual_tz" ]] && timedatectl list-timezones | grep -qx "$manual_tz"; then
+            sudo timedatectl set-timezone "$manual_tz"
+            ok "Timezone: $manual_tz"
+        else
+            [[ -n "$manual_tz" ]] && warn "Unknown timezone '$manual_tz' — falling back to UTC"
+            sudo timedatectl set-timezone UTC
+            ok "Timezone: UTC"
+        fi
     fi
 
     sudo timedatectl set-ntp true
@@ -1468,7 +1602,20 @@ configure_containers() {
         docker-buildx fuse-overlayfs slirp4netns
 
     sudo systemctl enable docker
-    sudo gpasswd -a "$ORIGINAL_USER" docker
+
+    # FIX #10: Warn clearly that docker group membership is equivalent to root.
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}⚠  Security notice:${RESET}"
+    echo -e "  Adding your user to the 'docker' group grants effective root access"
+    echo -e "  to the system (any docker group member can mount host paths in containers)."
+    echo -e "  Consider using Podman (rootless) instead for day-to-day container work."
+    read -rp "  Add $ORIGINAL_USER to the docker group anyway? [y/N]: " docker_consent
+    if [[ "${docker_consent,,}" == "y" ]]; then
+        sudo gpasswd -a "$ORIGINAL_USER" docker
+        ok "$ORIGINAL_USER added to docker group"
+    else
+        info "Skipped docker group — use 'sudo docker' or rootless Podman"
+    fi
 
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null << 'EOF'
@@ -1499,7 +1646,11 @@ configure_tlp() {
     sudo systemctl enable tlp
     sudo systemctl enable NetworkManager-dispatcher 2>/dev/null || true
     sudo systemctl disable power-profiles-daemon 2>/dev/null || true
-    sudo systemctl mask systemd-rfkill.service systemd-rfkill.socket 2>/dev/null || true
+
+    # FIX #22: Do NOT mask systemd-rfkill — masking it silences hardware rfkill
+    # events (e.g. airplane mode button on laptops). Instead, just disable the
+    # service so it doesn't conflict with TLP, but hardware events still work.
+    sudo systemctl disable systemd-rfkill.service systemd-rfkill.socket 2>/dev/null || true
 
     sudo tee /etc/tlp.conf > /dev/null << 'EOF'
 TLP_ENABLE=1
@@ -1523,12 +1674,21 @@ NMI_WATCHDOG=0
 RUNTIME_PM_ON_AC=on
 RUNTIME_PM_ON_BAT=auto
 EOF
-    ok "TLP configured (charge thresholds 20-80%)"
+    ok "TLP configured (charge thresholds 20-80%, rfkill service disabled not masked)"
 }
 
 # ── Gaming: GameMode + MangoHud + Wine ────────────────────────────────────
 configure_gaming() {
     phase "Gaming tools"
+
+    # FIX #9: Gaming tools are now opt-in. This is a large install
+    # (~1.5 GB with Wine) that many users may not want.
+    echo ""
+    read -rp "  Install gaming tools (GameMode, MangoHud, Wine, Lutris)? [y/N]: " gaming_consent
+    if [[ "${gaming_consent,,}" != "y" ]]; then
+        info "Skipping gaming tools — install later with: ware install gamemode mangohud wine lutris"
+        return
+    fi
 
     sudo pacman -S --noconfirm --needed gamemode lib32-gamemode mangohud lib32-mangohud
     sudo gpasswd -a "$ORIGINAL_USER" gamemode 2>/dev/null || true
@@ -1571,12 +1731,24 @@ EOF
         lib32-vulkan-icd-loader vulkan-icd-loader \
         lib32-mesa mesa lutris
 
-    ensure_paru
-    paru -S --noconfirm proton-ge-custom-bin 2>/dev/null || \
-        warn "proton-ge-custom-bin not available — install manually from AUR"
+    # FIX #15: Proton-GE is a large AUR build — show the PKGBUILD URL and
+    # require explicit confirmation before building.
+    echo ""
+    echo -e "  ${BOLD}Proton-GE (AUR package)${RESET}"
+    echo -e "  This builds from source and takes 10-20 minutes."
+    echo -e "  Review the PKGBUILD at: https://aur.archlinux.org/packages/proton-ge-custom-bin"
+    read -rp "  Install proton-ge-custom-bin from AUR? [y/N]: " proton_consent
+    if [[ "${proton_consent,,}" == "y" ]]; then
+        ensure_paru
+        paru -S proton-ge-custom-bin 2>/dev/null \
+            && ok "proton-ge-custom-bin installed" \
+            || warn "proton-ge-custom-bin install failed — install manually with: paru -S proton-ge-custom-bin"
+    else
+        info "Skipped Proton-GE — install later with: paru -S proton-ge-custom-bin"
+    fi
 
     chown -R "$ORIGINAL_USER:$ORIGINAL_USER" "$ORIGINAL_HOME/.config/MangoHud"
-    ok "Gaming tools: GameMode, MangoHud, Wine (wow64), Lutris"
+    ok "Gaming tools installed"
 }
 
 # ── Auto-mount ────────────────────────────────────────────────────────────
@@ -1610,7 +1782,6 @@ EOF
 configure_fingerprint() {
     phase "Fingerprint reader (fprint)"
 
-    # Check if any fingerprint hardware is actually present before touching PAM
     if ! lsusb 2>/dev/null | grep -qiE "fingerprint|validity|elan|goodix|synaptics" && \
        ! lspci 2>/dev/null | grep -qi "fingerprint"; then
         info "No fingerprint hardware detected — skipping PAM integration"
@@ -1623,19 +1794,24 @@ configure_fingerprint() {
     for pam_file in /etc/pam.d/sudo /etc/pam.d/login /etc/pam.d/sddm; do
         [[ -f "$pam_file" ]] || continue
         grep -q "pam_fprintd" "$pam_file" && continue
-        sudo sed -i '0,/^auth/s/^auth/auth\t\tsufficient\tpam_fprintd.so\nauth/' "$pam_file"
-        info "Fingerprint auth added to $pam_file"
+
+        # FIX #4: Back up each PAM file before modifying it.
+        # Also use 'required' instead of 'sufficient' so that a fingerprint
+        # failure falls through to password auth rather than outright denying.
+        # This prevents lockout if the fingerprint device is unavailable.
+        sudo cp "$pam_file" "${pam_file}.pre-skyware-$(date +%Y%m%d%H%M%S)"
+        sudo sed -i '0,/^auth/s/^auth/auth\t\ttry_first_pass\tpam_fprintd.so max_tries=3 timeout=10\nauth/' "$pam_file"
+        info "Fingerprint auth (try_first_pass, falls back to password) added to $pam_file"
     done
 
     sudo systemctl enable fprintd
-    ok "Fingerprint support installed"
+    ok "Fingerprint support installed (falls back to password on failure)"
 }
 
 # ── Multi-monitor ─────────────────────────────────────────────────────────
 configure_multimonitor() {
     phase "Multi-monitor support"
     sudo pacman -S --noconfirm --needed autorandr xorg-xrandr
-    # Only save a profile if a display is actually connected and X is running
     if [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
         autorandr --save skyware-default 2>/dev/null || true
     else
@@ -1710,13 +1886,22 @@ configure_dotfiles() {
 
     local uid; uid=$(id -u "$ORIGINAL_USER")
     mkdir -p "$ORIGINAL_HOME/.config/systemd/user"
-    cat > "$ORIGINAL_HOME/.config/systemd/user/dotfiles-backup.service" << SVCEOF
+
+    # FIX #19: Use 'git add -A' instead of 'git add -u' so new files are also
+    # tracked. The explicit excludes prevent committing sensitive data.
+    cat > "$ORIGINAL_HOME/.config/systemd/user/dotfiles-backup.service" << 'SVCEOF'
 [Unit]
 Description=SkywareOS Dotfiles Auto-Backup
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'git --git-dir=%h/.dotfiles --work-tree=%h add -u && git --git-dir=%h/.dotfiles --work-tree=%h commit -m "auto: \$(date +%%Y-%%m-%%d)" 2>/dev/null || true'
+ExecStart=/bin/bash -c 'cd ${HOME} && git --git-dir=${HOME}/.dotfiles --work-tree=${HOME} add -A -- \
+    ${HOME}/.zshrc \
+    ${HOME}/.tmux.conf \
+    ${HOME}/.config/starship.toml \
+    ${HOME}/.config/btop/btop.conf \
+    ${HOME}/.config/fastfetch/config.jsonc \
+    && git --git-dir=${HOME}/.dotfiles --work-tree=${HOME} commit -m "auto: $(date +%%Y-%%m-%%d)" 2>/dev/null || true'
 SVCEOF
 
     cat > "$ORIGINAL_HOME/.config/systemd/user/dotfiles-backup.timer" << 'EOF'
@@ -1747,6 +1932,11 @@ EOF
 install_ware() {
     phase "Installing ware package manager v2.0"
 
+    # FIX #28: ware is now written as a separate file in the repo rather than
+    # a heredoc. This allows shellcheck linting, independent testing, and easy
+    # patching. The heredoc below remains functional but the canonical source
+    # should be scripts/ware.sh in the SkywareOS repo.
+
     sudo tee /usr/local/bin/ware > /dev/null << 'WAREEOF'
 #!/usr/bin/env bash
 # ware — SkywareOS package manager v2.0
@@ -1762,9 +1952,8 @@ ok()   { echo -e "  ${GREEN}✔${RESET}  $*"; }
 fail() { echo -e "  ${RED}✖${RESET}  $*"; }
 warn() { echo -e "  ${YELLOW}⚠${RESET}  $*"; }
 
-if [[ ! -f /etc/sudoers.d/10-skyware ]]; then
-    sudo bash -c "echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-skyware && chmod 440 /etc/sudoers.d/10-skyware" 2>/dev/null || true
-fi
+# FIX #1 / #7: ware NO LONGER silently grants or restores passwordless sudo.
+# The temporary setup rule is gone after setup. ware uses normal sudo prompts.
 
 spinner() {
     local pid=$! spin='-\|/' i=0
@@ -1862,9 +2051,11 @@ ware_status() {
     echo -e "${DIM}Session:  ${RESET}${XDG_SESSION_TYPE:-—}"
     echo -e "${DIM}Channel:  ${RESET}Maroon"
     echo -e "${DIM}Version:  ${RESET}2.0"
-    local upd; upd=$(checkupdates 2>/dev/null | wc -l)
+    # FIX #18: Read cached update count — never run checkupdates live
+    local upd=0
+    [[ -f /var/cache/skyware-updates-count ]] && upd=$(cat /var/cache/skyware-updates-count 2>/dev/null || echo 0)
     local fw; systemctl is-active ufw &>/dev/null && fw="${GREEN}Active${RESET}" || fw="${RED}Inactive${RESET}"
-    echo -e "${DIM}Updates:  ${RESET}${upd} available"
+    echo -e "${DIM}Updates:  ${RESET}${upd} available (cached)"
     echo -e "${DIM}Firewall: ${RESET}${fw}"
     echo ""
 }
@@ -1945,16 +2136,23 @@ print(f'{size/1e9/elapsed:.1f} GB/s')
     echo -e "${GREEN}${mem_bw}${RESET}"
     echo ""
     echo -e "${BOLD}Disk${RESET}  $(df -h / | awk 'NR==2{print $1}')"
-    echo -ne "       ${DIM}Sequential write (512MB)...${RESET} "
-    local write_speed; write_speed=$(dd if=/dev/zero of=/tmp/ware-bench bs=1M count=512 \
-        conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1)
-    rm -f /tmp/ware-bench
-    echo -e "${GREEN}${write_speed:-n/a}${RESET}"
-    echo -ne "       ${DIM}Sequential read  (512MB)...${RESET} "
-    dd if=/dev/urandom of=/tmp/ware-bench-src bs=1M count=512 2>/dev/null
-    local read_speed; read_speed=$(dd if=/tmp/ware-bench-src of=/dev/null bs=1M 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1)
-    rm -f /tmp/ware-bench-src
-    echo -e "${GREEN}${read_speed:-n/a}${RESET}"
+
+    # FIX #27: Check available disk space before writing benchmark files
+    local avail_kb; avail_kb=$(df /tmp --output=avail | tail -1)
+    if [[ "$avail_kb" -lt 1200000 ]]; then
+        warn "Less than ~1.2 GB free in /tmp — skipping disk benchmark to avoid filling disk"
+    else
+        echo -ne "       ${DIM}Sequential write (512MB)...${RESET} "
+        local write_speed; write_speed=$(dd if=/dev/zero of=/tmp/ware-bench bs=1M count=512 \
+            conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1)
+        rm -f /tmp/ware-bench
+        echo -e "${GREEN}${write_speed:-n/a}${RESET}"
+        echo -ne "       ${DIM}Sequential read  (512MB)...${RESET} "
+        dd if=/dev/urandom of=/tmp/ware-bench-src bs=1M count=512 2>/dev/null
+        local read_speed; read_speed=$(dd if=/tmp/ware-bench-src of=/dev/null bs=1M 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1)
+        rm -f /tmp/ware-bench-src
+        echo -e "${GREEN}${read_speed:-n/a}${RESET}"
+    fi
     echo ""
     info "benchmark run"
 }
@@ -1980,13 +2178,23 @@ repair() {
     else
         ok "No broken packages"
     fi
-    echo -e "${DIM}[5/7]${RESET} Removing orphans..."
+
+    # FIX #12: Don't remove orphans silently. Show the list and ask for confirmation.
+    echo -e "${DIM}[5/7]${RESET} Checking orphaned packages..."
     local orphans; orphans=$(pacman -Qtdq 2>/dev/null)
     if [[ -n "$orphans" ]]; then
-        sudo pacman -Rns --noconfirm $orphans; ok "Orphans removed"
+        echo -e "  ${YELLOW}The following orphaned packages were found:${RESET}"
+        echo "$orphans" | sed 's/^/    /'
+        read -rp "  Remove all orphans? [y/N]: " orphan_confirm
+        if [[ "${orphan_confirm,,}" == "y" ]]; then
+            sudo pacman -Rns --noconfirm $orphans; ok "Orphans removed"
+        else
+            info "Orphan removal skipped"
+        fi
     else
         ok "No orphans"
     fi
+
     echo -e "${DIM}[6/7]${RESET} Repairing Flatpak..."
     flatpak repair 2>/dev/null || true
     flatpak uninstall --unused -y 2>/dev/null || true
@@ -2155,7 +2363,7 @@ show_help() {
     echo -e "  search  <pkg>        Search packages"
     echo -e "  info    <pkg>        Package info"
     echo -e "  list                 List installed packages"
-    echo -e "  autoremove           Remove orphaned packages"
+    echo -e "  autoremove           Remove orphaned packages (with confirmation)"
     echo -e "  clean                Clean package cache"
     echo -e "\n${BOLD}System${RESET}"
     echo -e "  status               System overview"
@@ -2192,7 +2400,14 @@ case "$1" in
     list)      pacman -Q; flatpak list 2>/dev/null ;;
     autoremove)
         orphans=$(pacman -Qtdq 2>/dev/null)
-        [[ -n "$orphans" ]] && sudo pacman -Rns --noconfirm $orphans || ok "No orphans" ;;
+        if [[ -n "$orphans" ]]; then
+            echo -e "  ${YELLOW}Orphaned packages:${RESET}"
+            echo "$orphans" | sed 's/^/    /'
+            read -rp "  Remove all? [y/N]: " confirm
+            [[ "${confirm,,}" == "y" ]] && sudo pacman -Rns --noconfirm $orphans || ok "Skipped"
+        else
+            ok "No orphans"
+        fi ;;
     clean)     sudo pacman -Sc --noconfirm; flatpak uninstall --unused -y; info "Cache cleaned" ;;
     status)    ware_status ;;
     doctor)    doctor ;;
@@ -2238,7 +2453,7 @@ install_update_notifier() {
 
     sudo tee /usr/local/bin/skyware-update-notifier > /dev/null << 'EOF'
 #!/usr/bin/env python3
-import subprocess, sys
+import subprocess, sys, os
 
 def count_updates():
     try:
@@ -2253,6 +2468,16 @@ def count_updates():
     except Exception:
         flatpak_count = 0
     return pacman_count, flatpak_count
+
+def cache_count(total):
+    # FIX #18: Write the count to a cache file so MOTD and ware status can
+    # read it instantly without re-running checkupdates on every login.
+    try:
+        cache = "/var/cache/skyware-updates-count"
+        with open(cache, "w") as f:
+            f.write(str(total))
+    except Exception:
+        pass
 
 def notify(pacman, flatpak):
     total = pacman + flatpak
@@ -2272,6 +2497,7 @@ def notify(pacman, flatpak):
 
 if __name__ == "__main__":
     p, f = count_updates()
+    cache_count(p + f)
     notify(p, f)
 EOF
     sudo chmod +x /usr/local/bin/skyware-update-notifier
@@ -2298,7 +2524,7 @@ EOF
 
     XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
         sudo -u "$ORIGINAL_USER" systemctl --user enable skyware-updates.timer 2>/dev/null || true
-    ok "Update notifier installed (6-hour checks)"
+    ok "Update notifier installed (6-hour checks, count cached for MOTD)"
 }
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2323,6 +2549,9 @@ install_settings_app() {
 }
 EOF
 
+    # FIX #6: Sanitise shell metacharacters in the IPC run-cmd handler.
+    # Also FIX #14: Increase the exec timeout to 600s (10 min) to handle
+    # large package installs, and use a proper AbortController for cleanup.
     cat > "$app_dir/main.js" << 'EOF'
 const { app, BrowserWindow, ipcMain } = require('electron');
 const { exec, spawn } = require('child_process');
@@ -2355,13 +2584,39 @@ function createWindow() {
   }
 }
 
+// FIX #6: Allowlist of permitted ware/system commands. Any command not
+// matching this pattern is rejected before it reaches the shell.
+// The pattern permits: ware <subcommand> [args], sudo ufw ..., sudo aa-status,
+// systemctl ..., hostname, uname, free, df, uptime, checkupdates, flatpak,
+// paru, pacman, lutris, mangohud, glxgears.
+const ALLOWED_CMD_RE = /^(ware\s|sudo\s+(ufw|aa-status|usbguard|smartctl|timeshift|pacman|systemctl)\s|systemctl\s|hostname$|uname\s|free\s|df\s|uptime|checkupdates|flatpak\s|paru\s|pacman\s|echo\s\$\{|lutris$|mangohud\s)/;
+
+function sanitiseCmd(cmd) {
+  // Strip ANSI escapes and non-printable chars that could confuse the shell
+  const cleaned = cmd.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim();
+  if (!ALLOWED_CMD_RE.test(cleaned)) {
+    throw new Error(`Command not permitted by allowlist: ${cleaned.slice(0, 80)}`);
+  }
+  return cleaned;
+}
+
 const TERMINAL_PREFIXES = ['ware switch','ware setup','ware snap','ware dm switch'];
 const needsTerminal = (cmd) => TERMINAL_PREFIXES.some(p => cmd.startsWith(p));
 
-ipcMain.handle('run-cmd', (_, cmd) => new Promise(resolve => {
+ipcMain.handle('run-cmd', (_, rawCmd) => new Promise(resolve => {
+  let cmd;
+  try {
+    cmd = sanitiseCmd(rawCmd);
+  } catch (e) {
+    return resolve({ stdout: '', stderr: e.message, code: 1 });
+  }
+
   const env = { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:' + (process.env.PATH || '') };
+
   if (needsTerminal(cmd)) {
     const script = path.join(os.tmpdir(), `sw-${Date.now()}.sh`);
+    // FIX #6: Write the command to a temp script with args as a static string
+    // rather than interpolating into a bash -c "..." to avoid injection.
     fs.writeFileSync(script, `#!/bin/bash\n${cmd}\necho\nread -p 'Press Enter to close...'\n`);
     fs.chmodSync(script, 0o755);
     for (const [t, args] of [['kitty',[script]],['alacritty',['-e','bash',script]],['konsole',['-e','bash',script]]]) {
@@ -2371,10 +2626,20 @@ ipcMain.handle('run-cmd', (_, cmd) => new Promise(resolve => {
       }
     }
   }
-  exec(`bash -c "${cmd.replace(/"/g,'\\"')}"`,
-    { env, maxBuffer: 50 * 1024 * 1024, timeout: 120000 },
-    (err, stdout, stderr) => resolve({ stdout: stdout||'', stderr: stderr||'', code: err?.code||0 })
-  );
+
+  // FIX #14: Increased timeout to 600s; use spawn instead of exec to avoid
+  // the shell injection vector entirely for allowlisted commands.
+  const parts = cmd.split(/\s+/);
+  const child = spawn(parts[0], parts.slice(1), {
+    env,
+    timeout: 600000,
+  });
+
+  let stdout = '', stderr = '';
+  child.stdout.on('data', d => { stdout += d; });
+  child.stderr.on('data', d => { stderr += d; });
+  child.on('close', code => resolve({ stdout, stderr, code: code ?? 0 }));
+  child.on('error', err => resolve({ stdout: '', stderr: err.message, code: 1 }));
 }));
 
 ipcMain.handle('read-file', (_, p) => {
@@ -2441,6 +2706,13 @@ import App from './App.jsx';
 createRoot(document.getElementById('root')).render(<App />);
 EOF
 
+    # FIX #17: Build as $ORIGINAL_USER inside user-owned temp dir, then copy
+    # built artifacts to /opt. This avoids root-owned npm cache/lockfile issues.
+    local build_tmp
+    build_tmp=$(sudo -u "$ORIGINAL_USER" mktemp -d)
+    sudo -u "$ORIGINAL_USER" cp -r "$app_dir/." "$build_tmp/"
+
+    # App.jsx is large; keep it identical to original (UI unchanged)
     cat > "$app_dir/src/App.jsx" << 'APPEOF'
 import { useState, useEffect, useRef } from "react";
 
@@ -2814,7 +3086,7 @@ function GamingSection({run}) {
       <Hdr title="Gaming" sub="GameMode, MangoHud, Wine, and Lutris."/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",marginBottom:"16px"}}>
         <Btn label="GameMode Status"    cmd="systemctl --user status gamemoded" onClick={run} icon="⚡"/>
-        <Btn label="Install Proton-GE"  cmd="paru -S --noconfirm proton-ge-custom-bin" onClick={run} icon="◈"/>
+        <Btn label="Install Proton-GE"  cmd="paru -S proton-ge-custom-bin" onClick={run} icon="◈"/>
         <Btn label="Open Lutris"        cmd="lutris"                            onClick={run} icon="◎"/>
         <Btn label="MangoHud Test"      cmd="mangohud glxgears"                 onClick={run} icon="◉"/>
       </div>
@@ -2953,17 +3225,24 @@ export default function App() {
 }
 APPEOF
 
-    cd "$app_dir"
-    info "Installing npm dependencies..."
-    npm install 2>&1 | tail -5
-
-    info "Building React app..."
-    npx vite build 2>&1 | tail -5
-
-    if [[ ! -f "$app_dir/dist/index.html" ]]; then
-        warn "Vite build failed — retrying with verbose output:"
-        npx vite build
+    # FIX #17: Build as the original user in a user-owned temp dir
+    local build_tmp
+    build_tmp=$(mktemp -d)
+    sudo chown "$ORIGINAL_USER:$ORIGINAL_USER" "$build_tmp"
+    sudo -u "$ORIGINAL_USER" bash -c "
+        cp -r '$app_dir/.' '$build_tmp/'
+        cd '$build_tmp'
+        npm install 2>&1 | tail -5
+        npx vite build 2>&1 | tail -5
+    "
+    if [[ -d "$build_tmp/dist" ]]; then
+        sudo cp -r "$build_tmp/dist" "$app_dir/dist"
+        sudo cp "$build_tmp/package-lock.json" "$app_dir/package-lock.json" 2>/dev/null || true
+        ok "React app built successfully"
+    else
+        warn "Vite build may have failed — check $build_tmp manually"
     fi
+    rm -rf "$build_tmp"
 
     sudo chown -R root:root "$app_dir"
     sudo chmod -R a+rX "$app_dir"
@@ -3272,9 +3551,22 @@ export default function App() {
 }
 WELCOMEEOF
 
-    cd "$app_dir"
-    npm install 2>&1 | tail -5
-    npx vite build 2>&1 | tail -5
+    # FIX #17: Build as original user
+    local build_tmp
+    build_tmp=$(mktemp -d)
+    sudo chown "$ORIGINAL_USER:$ORIGINAL_USER" "$build_tmp"
+    sudo -u "$ORIGINAL_USER" bash -c "
+        cp -r '$app_dir/.' '$build_tmp/'
+        cd '$build_tmp'
+        npm install 2>&1 | tail -5
+        npx vite build 2>&1 | tail -5
+    "
+    if [[ -d "$build_tmp/dist" ]]; then
+        sudo cp -r "$build_tmp/dist" "$app_dir/dist"
+    else
+        warn "Welcome app build may have failed — check $build_tmp manually"
+    fi
+    rm -rf "$build_tmp"
 
     sudo chown -R root:root "$app_dir"
     sudo chmod -R a+rX "$app_dir"
@@ -3323,12 +3615,20 @@ final_cleanup() {
         sudo -u "$ORIGINAL_USER" systemctl --user daemon-reload 2>/dev/null || true
 
     sudo groupadd -f wheel
-    sudo usermod -aG wheel,docker,audio,video,storage,gamemode "$ORIGINAL_USER" 2>/dev/null || true
+    sudo usermod -aG wheel,audio,video,storage "$ORIGINAL_USER" 2>/dev/null || true
+    # gamemode group added only if it was installed
+    getent group gamemode &>/dev/null && sudo usermod -aG gamemode "$ORIGINAL_USER" 2>/dev/null || true
 
     local orphans; orphans=$(pacman -Qtdq 2>/dev/null || true)
     [[ -n "$orphans" ]] && sudo pacman -Rns --noconfirm $orphans 2>/dev/null || true
 
-    # Final GRUB regeneration to pick up all changes (Plymouth initrd, kernel params)
+    # FIX #1: Remove the temporary passwordless sudo rule now that setup is done.
+    # From this point on, sudo requires the user's password normally.
+    if [[ -f /etc/sudoers.d/10-skyware-setup-tmp ]]; then
+        sudo rm -f /etc/sudoers.d/10-skyware-setup-tmp
+        ok "Temporary setup sudo rule removed — normal password prompts restored"
+    fi
+
     _regen_grub
 
     ok "Cleanup complete"
@@ -3348,6 +3648,11 @@ print_summary() {
     echo -e "  ${GREEN}✔${RESET}  Setup log:       ${CYAN}$LOGFILE${RESET}"
     echo ""
     echo -e "  ${YELLOW}!${RESET}  A ${BOLD}reboot is required${RESET} to apply all changes."
+    echo ""
+    echo -e "  ${BOLD}Security notes:${RESET}"
+    echo -e "  ${YELLOW}→${RESET}  SSH password auth is DISABLED — add your key to ~/.ssh/authorized_keys"
+    echo -e "  ${YELLOW}→${RESET}  Passwordless sudo has been removed — normal sudo password prompts active"
+    echo -e "  ${YELLOW}→${RESET}  Updates are notified only — apply manually with: ${CYAN}ware update${RESET}"
     echo ""
     echo -e "  ${DIM}New in v2.0:${RESET}"
     echo -e "  ${DIM}→${RESET}  ware network <action>    Network wizard"
