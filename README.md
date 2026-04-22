@@ -1,5 +1,7 @@
 # SkywareOS
 
+# This Distribution has reached End of Life. Thank you for supporting SkywareOS along its development.
+
 <details>
 <summary>Update Logs</summary>
 <br>
